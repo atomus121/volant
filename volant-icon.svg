@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Volant app icon</title>
+  <desc id="desc">A white, left-diving Swoop mark on a black rounded-square app icon at 72 percent optical scale.</desc>
+  <rect width="512" height="512" rx="112" fill="#0B0C0E"/>
+  <g transform="translate(-45 -45) scale(1.193)" fill="#FFFFFF">
+    <path d="M352 104C227 172 141 268 110 406C207 359 289 297 351 207C374 172 393 136 407 98C369 138 326 172 278 198C300 173 327 138 352 104Z"/>
+  </g>
+</svg>

@@ -1,0 +1,9 @@
+[package]
+name = "gpui-proto"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+bench-model = { workspace = true }
+gpui = "=0.2.2"

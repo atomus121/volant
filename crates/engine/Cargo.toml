@@ -1,0 +1,23 @@
+[package]
+name = "volant-engine"
+description = "Volant HTTP 下载引擎：probe、动态分段、稀疏 part 文件、断点续传"
+version = "0.6.16"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+percent-encoding.workspace = true
+fs2 = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+# 稀疏 part 文件（src/part.rs）：FSCTL_SET_SPARSE，否则 NTFS 在 set_len 后写文件中部会同步补零。
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_Threading"] }
+
+[dev-dependencies]
+volant-labserver.workspace = true
+tempfile = "3"

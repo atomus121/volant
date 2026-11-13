@@ -1,0 +1,9 @@
+[package]
+name = "rq-spike"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+librqbit = "=9.1.0"

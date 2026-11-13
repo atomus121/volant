@@ -1,0 +1,13 @@
+[package]
+name = "slint-proto"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+build = "build.rs"
+
+[dependencies]
+bench-model = { workspace = true }
+slint = { version = "1", default-features = false, features = ["std", "backend-winit", "renderer-femtovg", "compat-1-2"] }
+
+[build-dependencies]
+slint-build = "1"

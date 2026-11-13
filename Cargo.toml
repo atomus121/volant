@@ -1,0 +1,31 @@
+[workspace]
+resolver = "3"
+members = ["crates/engine", "crates/labserver", "crates/cli", "crates/app", "crates/torrent", "spike/bench-model", "spike/egui-proto", "spike/slint-proto", "spike/rq-spike", "spike/tokio-base"]
+# gpui-proto 在本机无法构建（缺 Windows SDK 的 fxc.exe，见 docs/m0/REPORT.md 7.2），
+# 留在 spike/ 作记录，但不进 workspace，否则 `cargo build --workspace` 直接失败。
+exclude = ["spike/gpui-proto"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+
+[workspace.dependencies]
+bench-model = { path = "spike/bench-model" }
+volant-engine = { path = "crates/engine" }
+volant-labserver = { path = "crates/labserver" }
+volant-torrent = { path = "crates/torrent" }
+
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "fs", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+percent-encoding = "2"
+# 必须 default-features = false：reqwest 0.13 的 default-tls = rustls，会拖进 aws-lc-sys 的
+# C 构建（本项目 windows-gnu 环境下 jitterentropy 必崩，见 docs/m0/REPORT.md 第 5 节）。
+reqwest = { version = "0.13.5", default-features = false, features = ["native-tls", "charset", "system-proxy"] }
+# 两条路线必须用同一个 release profile，否则二进制体积比较不成立。
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

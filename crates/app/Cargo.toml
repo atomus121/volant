@@ -1,0 +1,52 @@
+[package]
+name = "volant-app"
+version = "0.6.16"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Volant 桌面端：egui 界面 + 引擎事件"
+
+[[bin]]
+name = "volant"
+path = "src/main.rs"
+
+# 浏览器清单只能写一个 exe 路径、不能带参数，所以 host 必须是独立入口。
+[[bin]]
+name = "volant-host"
+path = "src/host.rs"
+
+[dependencies]
+volant-engine = { workspace = true }
+volant-torrent = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow"] }
+png = "0.18"
+raw-window-handle = "0.6"
+
+[dev-dependencies]
+# 端到端测试里现造种子（create_torrent / BlockingSpawner）。
+librqbit = "=9.1.0"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+    "Win32_System_IO",
+    # 读一次 HKCU 的 AppsUseLightTheme（设置里的「跟随系统」）。
+    "Win32_System_Registry",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    # 设置里的「选择下载目录」：SHBrowseForFolderW + CoTaskMemFree。
+    # 那三个 shell 项在 0.61 里另外挂在 Win32_UI_Shell_Common 下面。
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_System_Com",
+] }

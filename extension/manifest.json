@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Volant 下载捕获",
+  "version": "0.6.16",
+  "description": "把浏览器的下载交给 Volant：带上 Cookie / Referer，继续用浏览器的登录身份下载。",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsuDENGKQmV8l3jCylr+U5iAARA84QDkY1GfV6n0Vq18FoZacaAAA4pGkvR0/37gwgK7aKW3sKegAgQSBr7oUTAuR0n0Xt3aByk16QKd3ZGFfOgqvHl3aOLSbz0moA1BEvcpMbk7S6GdZQMAsqj+trSIOZjKj/m1Py7dXBjK4bhWvaJ4dFWJAHiGX8acLUMFstJx6GndmBprxNUgGx1D3aXqClJxm6tFTFG32/Zmax1jXSCHgB4HnYuco43fvCmWaumhdgZlDk2KPP5yNg6tt+fnTXpwxwg6rehiZLNHOC/vxbQ0dpZV0y8BtHKJ5nOMa3xoQmJmimKcqyVw6hSwPIQIDAQAB",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "volant@local",
+      "strict_min_version": "109.0"
+    }
+  },
+  "permissions": ["downloads", "cookies", "storage", "nativeMessaging"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Volant 下载捕获",
+    "default_popup": "popup.html"
+  }
+}

@@ -1,0 +1,15 @@
+[package]
+name = "volant-cli"
+description = "Volant 的命令行入口：不靠 UI 把文件下完"
+version = "0.6.16"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio.workspace = true
+volant-engine.workspace = true
+
+[dev-dependencies]
+volant-labserver.workspace = true
+tempfile = "3"

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      :root { color-scheme: dark; }
+      body {
+        margin: 0;
+        padding: 14px 16px;
+        width: 268px;
+        background: #17181c;
+        color: #e8e8ea;
+        font: 13px/1.5 "Segoe UI", system-ui, sans-serif;
+      }
+      h1 { margin: 0 0 2px; font-size: 14px; font-weight: 600; }
+      .sub { color: #8b8d94; font-size: 12px; margin-bottom: 12px; }
+      label {
+        display: flex; align-items: center; gap: 8px;
+        padding: 8px 10px; border-radius: 8px; background: #22242a;
+        cursor: pointer; user-select: none;
+      }
+      input { accent-color: #5b8cff; width: 15px; height: 15px; margin: 0; }
+      #state { margin-top: 10px; font-size: 12px; color: #8b8d94; }
+      .bad { color: #ff8f6b; }
+      code { background: #22242a; padding: 1px 4px; border-radius: 4px; }
+    </style>
+  </head>
+  <body>
+    <h1>Volant 下载捕获</h1>
+    <div class="sub">浏览器里点下载，交给 Volant 跑（带上登录身份）。</div>
+    <label>
+      <input id="on" type="checkbox" />
+      <span>拦截浏览器下载</span>
+    </label>
+    <div id="state">检查中…</div>
+    <script src="popup.js"></script>
+  </body>
+</html>
