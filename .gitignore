@@ -1,4 +1,5 @@
 /target/
+/crates/app-gpui/target/
 /dist/
 
 *.log

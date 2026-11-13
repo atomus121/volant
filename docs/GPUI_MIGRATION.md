@@ -1,6 +1,7 @@
 # GPUI Migration
 
-Status: P0, shared application core extracted.
+Status: P0 complete. The GPUI Kit shell builds and runs on MSVC with the shared
+application core linked in.
 
 ## Decisions
 
@@ -33,7 +34,7 @@ UI wake-up through `notify::UiNotifier`; each GUI supplies its own adapter.
 
 | Phase | Deliverable | Exit condition |
 |---|---|---|
-| P0 | app-core extraction, MSVC toolchain, blank GPUI window | old GUI tests pass; GPUI and engine link on MSVC |
+| P0 | app-core extraction, MSVC toolchain, blank GPUI window | complete: old GUI tests pass; GPUI and engine build and run on MSVC |
 | P1 | shell, theme, fonts, icons, static list | 1180x760 and 520x340 layouts reviewed |
 | P2 | live list and detail panel | paste -> preview -> add -> progress -> pause -> resume -> done |
 | P3 | dialogs, settings, torrent picker, capture, clipboard | current feature set is available |
