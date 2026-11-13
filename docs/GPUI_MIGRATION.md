@@ -1,8 +1,8 @@
 # GPUI Migration
 
-Status: P2 complete. The GPUI Kit dashboard is connected to persisted state and
-the real download controller. HTTP add, progress, pause, resume and completion
-have been exercised against the local lab server.
+Status: P3 implementation complete, pending torrent/browser end-to-end
+validation. HTTP add with metadata preview, settings, delete confirmation,
+clipboard/capture wiring and torrent file selection are present.
 
 ## Decisions
 
@@ -38,7 +38,7 @@ UI wake-up through `notify::UiNotifier`; each GUI supplies its own adapter.
 | P0 | app-core extraction, MSVC toolchain, blank GPUI window | complete: old GUI tests pass; GPUI and engine build and run on MSVC |
 | P1 | shell, theme, fonts, icons, static list | complete: GPUI Kit dark theme, filters, summary cards and transfer rows render |
 | P2 | live list and detail panel | complete for HTTP: add -> progress -> pause -> resume -> done and state persistence |
-| P3 | dialogs, settings, torrent picker, capture, clipboard | current feature set is available |
+| P3 | dialogs, settings, torrent picker, capture, clipboard | implemented; HTTP dialog/settings verified, torrent/capture validation pending |
 | P4 | DPI, CJK, IME, focus, accessibility, file drop, window chrome | keyboard and pointer parity |
 | P5 | tests, screenshots, metrics, packaging | budgets pass after dogfooding |
 
