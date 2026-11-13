@@ -8176,6 +8176,7 @@ name = "volant-app-gpui"
 version = "0.6.16"
 dependencies = [
  "gpui-kit",
+ "tokio",
  "volant-app-core",
 ]
 
