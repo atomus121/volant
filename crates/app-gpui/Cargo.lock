@@ -8176,8 +8176,10 @@ name = "volant-app-gpui"
 version = "0.6.16"
 dependencies = [
  "gpui-kit",
+ "librqbit",
  "tokio",
  "volant-app-core",
+ "volant-torrent",
  "windows-sys 0.61.2",
 ]
 

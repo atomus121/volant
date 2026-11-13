@@ -688,6 +688,7 @@ struct VolantShell {
     last_save: Instant,
     notice: Option<String>,
     demo: bool,
+    focus_handle: FocusHandle,
     _events_task: Option<Task<()>>,
 }
 
@@ -742,7 +743,17 @@ impl VolantShell {
                         for capture in captures {
                             this.handle_capture(capture, window, cx);
                         }
-                        this.save_if_due();
+                        let has_active = this.rows.iter().any(|row| {
+                            matches!(
+                                row.status,
+                                Status::Active | Status::Seeding | Status::Probing
+                            )
+                        });
+                        if has_active {
+                            this.save_if_due();
+                        } else {
+                            this.save_now();
+                        }
                         window.refresh();
                         cx.notify();
                     });
@@ -761,6 +772,8 @@ impl VolantShell {
         };
 
         let selected = rows.first().map(|row| row.id);
+        let focus_handle = cx.focus_handle().tab_stop(true);
+        focus_handle.focus(window, cx);
         Self {
             home: paths.home.display().to_string(),
             torrents_dir: paths.torrents,
@@ -780,6 +793,7 @@ impl VolantShell {
             last_save: Instant::now(),
             notice: dir_note,
             demo,
+            focus_handle,
             _events_task: events_task,
         }
     }
@@ -901,38 +915,7 @@ impl VolantShell {
     ) {
         let mut accepted = 0;
         for path in paths.paths() {
-            if !path
-                .extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("torrent"))
-            {
-                continue;
-            }
-            let id = self.next_id;
-            self.next_id += 1;
-            let target = self.torrents_dir.join(format!("{id}.torrent"));
-            if let Some(parent) = target.parent()
-                && let Err(error) = std::fs::create_dir_all(parent)
-            {
-                self.notice = Some(format!("无法保存种子副本：{error}"));
-                continue;
-            }
-            if let Err(error) = std::fs::copy(path, &target) {
-                self.notice = Some(format!("无法读取种子文件：{error}"));
-                continue;
-            }
-            let mut row = Row::torrent(id, path.display().to_string());
-            row.status = Status::Probing;
-            row.torrent = Some(target.clone());
-            self.rows.insert(0, row);
-            self.selected = Some(id);
-            self.filter = Filter::All;
-            if let Some(control) = &self.control {
-                control.send(Cmd::InspectTorrent {
-                    id,
-                    source: volant_app_core::control::TorSource::File(target),
-                });
-            }
-            accepted += 1;
+            accepted += usize::from(self.queue_torrent_file(path));
         }
         if accepted > 0 {
             self.notice = Some(format!("已读取 {accepted} 个种子文件"));
@@ -942,6 +925,41 @@ impl VolantShell {
             self.notice = Some("拖入的文件里没有 .torrent".into());
         }
         cx.notify();
+    }
+
+    fn queue_torrent_file(&mut self, path: &std::path::Path) -> bool {
+        if !path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("torrent"))
+        {
+            return false;
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        let target = self.torrents_dir.join(format!("{id}.torrent"));
+        if let Some(parent) = target.parent()
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            self.notice = Some(format!("无法保存种子副本：{error}"));
+            return false;
+        }
+        if let Err(error) = std::fs::copy(path, &target) {
+            self.notice = Some(format!("无法读取种子文件：{error}"));
+            return false;
+        }
+        let mut row = Row::torrent(id, path.display().to_string());
+        row.status = Status::Probing;
+        row.torrent = Some(target.clone());
+        self.rows.insert(0, row);
+        self.selected = Some(id);
+        self.filter = Filter::All;
+        if let Some(control) = &self.control {
+            control.send(Cmd::InspectTorrent {
+                id,
+                source: volant_app_core::control::TorSource::File(target),
+            });
+        }
+        true
     }
 
     fn open_settings_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1523,39 +1541,30 @@ impl Render for VolantShell {
             .size_full()
             .bg(background)
             .text_color(foreground)
+            .track_focus(&self.focus_handle)
+            .key_context("Volant")
             .on_drop::<ExternalPaths>(cx.listener(|this, paths, window, cx| {
                 this.handle_external_paths(paths, window, cx);
             }))
             .child(
-                TitleBar::new()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .size(px(20.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded(px(5.0))
-                                    .bg(foreground)
-                                    .text_color(background)
-                                    .child("V"),
-                            )
-                            .child(div().text_size(px(12.5)).child("Volant")),
-                    )
-                    .child(
-                        Button::new("new-download")
-                            .secondary()
-                            .compact()
-                            .label("新建下载")
-                            .icon(IconName::Plus)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_add_dialog(window, cx);
-                            })),
-                    ),
+                TitleBar::new().child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .size(px(20.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(5.0))
+                                .bg(foreground)
+                                .text_color(background)
+                                .child("V"),
+                        )
+                        .child(div().text_size(px(12.5)).child("Volant")),
+                ),
             )
             .child(
                 div()
@@ -1623,17 +1632,38 @@ impl Render for VolantShell {
                             .gap_4()
                             .child(
                                 div()
-                                    .v_flex()
-                                    .gap_1()
-                                    .child(div().text_size(px(26.0)).child(self.filter.label()))
-                                    .child(div().text_size(px(12.0)).text_color(muted).child(
-                                        format!(
-                                            "{} 个任务 · GPUI Kit{}{}",
-                                            rows.len(),
-                                            if demo { " · Demo" } else { "" },
-                                            " · 真实下载引擎"
-                                        ),
-                                    )),
+                                    .flex()
+                                    .items_end()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .v_flex()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .text_size(px(26.0))
+                                                    .child(self.filter.label()),
+                                            )
+                                            .child(
+                                                div().text_size(px(12.0)).text_color(muted).child(
+                                                    format!(
+                                                        "{} 个任务 · GPUI Kit{}{}",
+                                                        rows.len(),
+                                                        if demo { " · Demo" } else { "" },
+                                                        " · 真实下载引擎"
+                                                    ),
+                                                ),
+                                            ),
+                                    )
+                                    .child(
+                                        Button::new("new-download")
+                                            .primary()
+                                            .label("新建下载")
+                                            .icon(IconName::Plus)
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.open_add_dialog(window, cx);
+                                            })),
+                                    ),
                             )
                             .when_some(notice, |this, notice| {
                                 this.child(
@@ -1936,6 +1966,11 @@ pub fn run() {
         .position(|arg| arg == "--add")
         .and_then(|index| args.get(index + 1))
         .cloned();
+    let initial_torrent = args
+        .iter()
+        .position(|arg| arg == "--torrent")
+        .and_then(|index| args.get(index + 1))
+        .map(std::path::PathBuf::from);
 
     application().with_assets(assets::Assets).run(move |cx| {
         init(cx);
@@ -1953,6 +1988,12 @@ pub fn run() {
             if let Some(url) = initial_add.clone() {
                 view.update(cx, |this, cx| {
                     this.queue_url(url);
+                    cx.notify();
+                });
+            }
+            if let Some(path) = initial_torrent.clone() {
+                view.update(cx, |this, cx| {
+                    this.queue_torrent_file(&path);
                     cx.notify();
                 });
             }

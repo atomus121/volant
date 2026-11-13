@@ -20,3 +20,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_HiDpi",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[dev-dependencies]
+librqbit = "=9.1.0"
+volant-torrent = { path = "../torrent" }

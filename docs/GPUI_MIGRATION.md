@@ -1,9 +1,9 @@
 # GPUI Migration
 
-Status: P4 platform pass complete. The app now has a GPUI Kit title bar,
-DPI-aware startup bounds, native folder picking, browser capture verification,
-and external torrent drop wiring. IME and full keyboard/accessibility parity
-still need validation.
+Status: P4 core complete. The app now has a GPUI Kit title bar, DPI-aware
+startup bounds, keyboard focus, AccessKit controls, Chinese text rendering,
+native folder picking, browser capture verification, external torrent drop
+wiring, and verified torrent selection/download.
 
 ## Decisions
 
@@ -40,7 +40,7 @@ UI wake-up through `notify::UiNotifier`; each GUI supplies its own adapter.
 | P1 | shell, theme, fonts, icons, static list | complete: GPUI Kit dark theme, filters, summary cards and transfer rows render |
 | P2 | live list and detail panel | complete for HTTP: add -> progress -> pause -> resume -> done and state persistence |
 | P3 | dialogs, settings, torrent picker, capture, clipboard | implemented; HTTP dialog/settings verified, torrent/capture validation pending |
-| P4 | DPI, CJK, IME, focus, accessibility, file drop, window chrome | partial: title bar, DPI, folder picker and capture verified; IME/a11y/drop validation remains |
+| P4 | DPI, CJK, IME, focus, accessibility, file drop, window chrome | core complete: title bar, DPI, Tab/AX tree, CJK, capture and torrent verified; native IME composition and OS drag gesture remain manual checks |
 | P5 | tests, screenshots, metrics, packaging | budgets pass after dogfooding |
 
 ## Acceptance Budgets
