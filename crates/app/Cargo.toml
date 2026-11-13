@@ -16,6 +16,7 @@ name = "volant-host"
 path = "src/host.rs"
 
 [dependencies]
+volant-app-core = { workspace = true }
 volant-engine = { workspace = true }
 volant-torrent = { workspace = true }
 tokio = { workspace = true }

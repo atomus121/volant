@@ -1,4 +1,4 @@
-//! 浏览器捕获的入口：扩展 → native host → **本进程** → 界面队列。
+//! 浏览器捕获的入口：扩展 → native host → **本进程** → GUI 队列。
 //!
 //! 管道上跑的就是 native messaging 的帧（4 字节小端长度 + JSON），host 只做字节转发，
 //! 所以这里读到的字节和浏览器发出的一模一样——host 不需要认识 JSON，扩展加字段也不用改它。
@@ -12,6 +12,8 @@
 #![allow(dead_code)]
 
 use std::io::{self, Read, Write};
+
+use crate::notify::Notifier;
 
 /// 管道名。单用户桌面应用，固定名字就够；多用户同时开同一台机器才会撞。
 pub const PIPE: &str = r"\\.\pipe\volant-capture";
@@ -80,7 +82,6 @@ mod imp {
     use std::sync::mpsc::Receiver;
     use std::thread::JoinHandle;
 
-    use eframe::egui;
     use windows_sys::Win32::Foundation::{
         CloseHandle, ERROR_PIPE_CONNECTED, GetLastError, INVALID_HANDLE_VALUE,
     };
@@ -111,7 +112,7 @@ mod imp {
 
     impl Listener {
         /// 后台线程守着管道，来一条捕获就往 `Receiver` 里塞一条。
-        pub fn start(ctx: egui::Context) -> (Listener, Receiver<Capture>) {
+        pub fn start(notify: super::Notifier) -> (Listener, Receiver<Capture>) {
             let (tx, rx) = std::sync::mpsc::channel();
             let stop = Arc::new(AtomicBool::new(false));
             let t_stop = stop.clone();
@@ -144,7 +145,7 @@ mod imp {
                         while let Ok(frame) = read_frame(&mut conn) {
                             let Some(c) = parse(&frame) else { continue };
                             if tx.send(c).is_ok() {
-                                ctx.request_repaint();
+                                notify.notify();
                             }
                         }
                         // 对端关掉了：File 析构时 CloseHandle，下一轮再建一个实例。
@@ -185,14 +186,12 @@ pub use imp::Listener;
 mod stub {
     use std::sync::mpsc::Receiver;
 
-    use eframe::egui;
-
     use super::Capture;
 
     pub struct Listener;
 
     impl Listener {
-        pub fn start(_ctx: egui::Context) -> (Listener, Receiver<Capture>) {
+        pub fn start(_notify: Notifier) -> (Listener, Receiver<Capture>) {
             let (_, rx) = std::sync::mpsc::channel();
             (Listener, rx)
         }

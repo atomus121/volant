@@ -5,12 +5,12 @@
 
 use std::path::PathBuf;
 
-use eframe::egui;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::Duration;
 
-use crate::control::{Cmd, Control, UiEvent};
-use crate::model::{Settings, sidecar};
+use volant_app_core::control::{Cmd, Control, UiEvent};
+use volant_app_core::model::{Settings, sidecar};
+use volant_app_core::notify;
 
 const TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -27,12 +27,7 @@ pub fn run(url: &str, dir: PathBuf) -> Result<String, String> {
         ..Settings::default()
     };
     let hosts = dir.join("hosts.json");
-    let (ctl, rx) = Control::start(
-        egui::Context::default(),
-        settings,
-        hosts,
-        dir.join("fallback"),
-    );
+    let (ctl, rx) = Control::start(notify::noop(), settings, hosts, dir.join("fallback"));
     let mut log = String::new();
 
     ctl.send(Cmd::Add {

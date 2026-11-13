@@ -3,6 +3,8 @@
 //! 轮询 `GetClipboardSequenceNumber`，只有序列号变了才去读文本——比定时读
 //! 剪贴板省事，也不会和别的程序抢剪贴板锁。不引入 arboard，直接用 windows-sys。
 
+use crate::notify::Notifier;
+
 #[cfg(windows)]
 mod imp {
     use std::sync::Arc;
@@ -11,7 +13,6 @@ mod imp {
     use std::thread::JoinHandle;
     use std::time::Duration;
 
-    use eframe::egui;
     use windows_sys::Win32::System::DataExchange::{
         CloseClipboard, GetClipboardData, GetClipboardSequenceNumber, OpenClipboard,
     };
@@ -29,7 +30,7 @@ mod imp {
 
     impl Watch {
         /// `enabled` 随时可以通过 `set_enabled` 改，不用重启线程。
-        pub fn start(ctx: egui::Context, enabled: bool) -> (Watch, Receiver<String>) {
+        pub fn start(notify: super::Notifier, enabled: bool) -> (Watch, Receiver<String>) {
             let (tx, rx) = std::sync::mpsc::channel();
             let (stop, on) = (
                 Arc::new(AtomicBool::new(false)),
@@ -59,7 +60,7 @@ mod imp {
                         };
                         let Some(url) = pick_url(&text) else { continue };
                         if tx.send(url).is_ok() {
-                            ctx.request_repaint();
+                            notify.notify();
                         }
                     }
                 })
@@ -189,7 +190,7 @@ mod stub {
     pub struct Watch;
 
     impl Watch {
-        pub fn start(_ctx: egui::Context, _enabled: bool) -> (Watch, Receiver<String>) {
+        pub fn start(_notify: Notifier, _enabled: bool) -> (Watch, Receiver<String>) {
             let (_, rx) = std::sync::mpsc::channel();
             (Watch, rx)
         }

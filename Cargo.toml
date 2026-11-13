@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/engine", "crates/labserver", "crates/cli", "crates/app", "crates/torrent", "spike/bench-model", "spike/egui-proto", "spike/slint-proto", "spike/rq-spike", "spike/tokio-base"]
+members = ["crates/engine", "crates/labserver", "crates/cli", "crates/app-core", "crates/app", "crates/torrent", "spike/bench-model", "spike/egui-proto", "spike/slint-proto", "spike/rq-spike", "spike/tokio-base"]
 # gpui-proto 在本机无法构建（缺 Windows SDK 的 fxc.exe，见 docs/m0/REPORT.md 7.2），
 # 留在 spike/ 作记录，但不进 workspace，否则 `cargo build --workspace` 直接失败。
 exclude = ["spike/gpui-proto"]
@@ -15,6 +15,7 @@ bench-model = { path = "spike/bench-model" }
 volant-engine = { path = "crates/engine" }
 volant-labserver = { path = "crates/labserver" }
 volant-torrent = { path = "crates/torrent" }
+volant-app-core = { path = "crates/app-core" }
 
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "fs", "signal"] }
 serde = { version = "1", features = ["derive"] }

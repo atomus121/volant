@@ -1,7 +1,7 @@
 //! 后台控制器：界面线程只发 `Cmd`、只收 `UiEvent`，两边没有共享状态。
 //!
 //! 这样界面不会因为引擎的锁卡帧，引擎也不用知道窗口存在（PRD 的模块边界）。
-//! 唯一的共享对象是 `egui::Context`——只用来在事件到来时叫醒重绘。
+//! 唯一的共享对象是 UI 通知器——只用来在事件到来时叫醒重绘。
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
@@ -11,7 +11,6 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use eframe::egui;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use volant_engine::{Config, Download, Error, Handle, probe_with};
 use volant_torrent::Torrents;
@@ -19,6 +18,7 @@ use volant_torrent::Torrents;
 use crate::model::{
     MAX_CONNECTIONS_PER_TASK, MAX_PARALLEL_DOWNLOADS, Settings, TorrentFile, writable_download_dir,
 };
+use crate::notify::Notifier;
 
 /// torrent 的来源。`.torrent` 传磁盘上的副本路径，控制器自己去读。
 #[derive(Clone, Debug)]
@@ -219,7 +219,7 @@ pub struct Control {
 
 impl Control {
     pub fn start(
-        ctx: egui::Context,
+        notify: Notifier,
         mut settings: Settings,
         hosts: PathBuf,
         fallback_dir: PathBuf,
@@ -238,14 +238,14 @@ impl Control {
                     Ok(rt) => rt,
                     Err(e) => {
                         let _ = ev_tx.send(UiEvent::Notice(format!("网络运行时启动失败：{e}")));
-                        ctx.request_repaint();
+                        notify.notify();
                         return;
                     }
                 };
                 let (msg_tx, msg_rx) = unbounded_channel();
                 let mut ctl = Controller::new(
                     rt.handle().clone(),
-                    ctx.clone(),
+                    notify.clone(),
                     settings,
                     hosts,
                     fallback_dir,
@@ -288,7 +288,7 @@ impl Drop for Control {
 
 struct Controller {
     rt: tokio::runtime::Handle,
-    ctx: egui::Context,
+    notify: Notifier,
     emit: Sender<UiEvent>,
     msg: UnboundedSender<Msg>,
     settings: Settings,
@@ -305,7 +305,7 @@ struct Controller {
 impl Controller {
     fn new(
         rt: tokio::runtime::Handle,
-        ctx: egui::Context,
+        notify: Notifier,
         settings: Settings,
         hosts: PathBuf,
         fallback_dir: PathBuf,
@@ -316,14 +316,14 @@ impl Controller {
             Ok(c) => Some(c),
             Err(e) => {
                 let _ = emit.send(UiEvent::Notice(format!("网络初始化失败：{e}")));
-                ctx.request_repaint();
+                notify.notify();
                 None
             }
         };
         let slots = SlotPool::new(settings.limit);
         Controller {
             rt,
-            ctx,
+            notify,
             emit,
             msg,
             settings,
@@ -339,7 +339,7 @@ impl Controller {
 
     fn send(&self, ev: UiEvent) {
         if self.emit.send(ev).is_ok() {
-            self.ctx.request_repaint();
+            self.notify.notify();
         }
     }
 
@@ -356,7 +356,7 @@ impl Controller {
             tor_rx,
             self.settings.clone(),
             self.emit.clone(),
-            self.ctx.clone(),
+            self.notify.clone(),
             self.fallback_dir.clone(),
             self.slots.clone(),
             self.msg.clone(),
@@ -396,7 +396,7 @@ impl Controller {
                     return;
                 };
                 let emit = self.emit.clone();
-                let ctx = self.ctx.clone();
+                let notify = self.notify.clone();
                 self.rt.spawn(async move {
                     let ev = match volant_engine::Url::parse(&url) {
                         Ok(parsed) => match probe_with(&client, &parsed, &headers).await {
@@ -418,7 +418,7 @@ impl Controller {
                         },
                     };
                     if emit.send(ev).is_ok() {
-                        ctx.request_repaint();
+                        notify.notify();
                     }
                 });
             }
@@ -553,8 +553,8 @@ impl Controller {
         );
 
         let emit = self.emit.clone();
-        let ctx = self.ctx.clone();
         let msg = self.msg.clone();
+        let notify = self.notify.clone();
         let settings = self.settings.clone();
         let hosts = self.hosts.clone();
         let fallback_dir = self.fallback_dir.clone();
@@ -571,7 +571,7 @@ impl Controller {
                 intent,
                 slot,
                 emit,
-                ctx,
+                notify,
             )
             .await;
             let _ = msg.send(Msg::Finished(id));
@@ -602,11 +602,11 @@ async fn run_one(
     intent: Arc<AtomicU8>,
     slot: Arc<Mutex<Option<Handle>>>,
     emit: Sender<UiEvent>,
-    ctx: egui::Context,
+    notify: Notifier,
 ) {
     let send = |ev: UiEvent| {
         if emit.send(ev).is_ok() {
-            ctx.request_repaint();
+            notify.notify();
         }
     };
 
@@ -771,14 +771,14 @@ async fn torrent_actor(
     mut rx: UnboundedReceiver<TorCmd>,
     mut settings: Settings,
     emit: Sender<UiEvent>,
-    ctx: egui::Context,
+    notify: Notifier,
     fallback_dir: PathBuf,
     slots: SlotPool,
     msg: UnboundedSender<Msg>,
 ) {
     let send = |ev: UiEvent| {
         if emit.send(ev).is_ok() {
-            ctx.request_repaint();
+            notify.notify();
         }
     };
     settings.normalize();
@@ -1184,7 +1184,7 @@ mod tests {
 
         let out = scratch("out");
         let (ctl, events) = Control::start(
-            egui::Context::default(),
+            crate::notify::noop(),
             Settings {
                 dir: out.clone(),
                 ..Default::default()

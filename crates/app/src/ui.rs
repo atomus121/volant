@@ -413,15 +413,16 @@ impl App {
                 RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
                 _ => None,
             });
+        let notify = crate::notify::egui(&cc.egui_ctx);
         let (control, events) = Control::start(
-            cc.egui_ctx.clone(),
+            notify.clone(),
             saved.settings.clone(),
             paths.hosts.clone(),
             fallback_dir,
         );
-        let (clip, clip_urls) = Watch::start(cc.egui_ctx.clone(), saved.settings.clipboard);
+        let (clip, clip_urls) = Watch::start(notify.clone(), saved.settings.clipboard);
         // 管道监听常开：它只是一个阻塞在 ConnectNamedPipe 上的线程，空闲不花 CPU。
-        let (capture, captured) = Listener::start(cc.egui_ctx.clone());
+        let (capture, captured) = Listener::start(notify);
         let dir_edit = saved.settings.dir.to_string_lossy().to_string();
         let initial_w = launch.size.map_or(1180.0, |size| size[0]);
         crate::log::line(&format!(

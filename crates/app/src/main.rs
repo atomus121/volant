@@ -2,17 +2,13 @@
 
 //! Volant 的窗口：eframe/glow 主线程 + 后台控制器线程。
 
-mod capture;
-mod clipboard;
-mod control;
-mod fmt;
-mod log;
 mod metrics;
-mod model;
-mod native;
+mod notify;
 mod selftest;
 mod theme;
 mod ui;
+
+pub use volant_app_core::{capture, clipboard, control, fmt, log, model, native};
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;

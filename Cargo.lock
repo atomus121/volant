@@ -6883,6 +6883,20 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "volant-app-core",
+ "volant-engine",
+ "volant-torrent",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "volant-app-core"
+version = "0.6.16"
+dependencies = [
+ "librqbit",
+ "serde",
+ "serde_json",
+ "tokio",
  "volant-engine",
  "volant-torrent",
  "windows-sys 0.61.2",
