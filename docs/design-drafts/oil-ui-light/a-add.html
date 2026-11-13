@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>页边 · 新建下载</title>
+  <link rel="stylesheet" href="common.css">
+  <style>
+    body { background: #eeeeee; }
+    .app-window { width: 650px; height: 470px; }
+    .body { flex: 1; min-height: 0; padding: 26px 30px 20px; display: flex; flex-direction: column; background: #ffffff; }
+    h1 { margin: 0; font-family: "Segoe UI Variable Display", "Segoe UI", "Microsoft YaHei UI", sans-serif; font-size: 27px; line-height: 1.18; font-weight: 610; letter-spacing: -.03em; }
+    .sub { margin: 7px 0 20px; color: #6f6b65; font-size: 12px; line-height: 1.5; }
+    .url { height: 43px; display: flex; align-items: center; gap: 9px; padding: 0 12px; border: 1px solid #1d1d1d; border-radius: 7px; background: #ffffff; }
+    .url input { flex: 1; min-width: 0; border: 0; outline: 0; color: #202020; background: transparent; font-size: 12px; }
+    .hint { margin: 8px 0 18px; color: #77736d; font-size: 10.5px; }
+    .receipt { padding-top: 15px; border-top: 1px solid #dedcd7; }
+    .receipt-head { display: flex; align-items: center; justify-content: space-between; gap: 15px; }
+    .receipt-head strong { font-size: 12.5px; font-weight: 600; }
+    .file { display: flex; align-items: center; gap: 11px; margin-top: 12px; }
+    .file-icon { width: 31px; height: 35px; display: grid; place-items: center; color: #34322f; }
+    .file-name { font-size: 14px; font-weight: 580; }
+    .file-origin { margin-top: 4px; color: #77736d; font-size: 10.5px; }
+    .meta { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 24px; margin-top: 16px; padding-top: 14px; border-top: 1px solid #e8e6e1; }
+    .meta span { display: block; color: #77736d; font-size: 10px; }
+    .meta b { display: block; margin-top: 4px; color: #242220; font-size: 11.5px; font-weight: 540; }
+    .destination { margin-top: auto; display: flex; align-items: center; gap: 9px; padding-top: 15px; border-top: 1px solid #e2dfda; color: #625e58; font-size: 10.5px; }
+    .destination span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .destination button { border: 0; color: #3e3b37; background: transparent; font-size: 10.5px; }
+    .footer { height: 52px; flex: 0 0 52px; display: flex; align-items: center; justify-content: space-between; padding: 0 30px; border-top: 1px solid #e5e3df; background: #ffffff; }
+    .footer span { color: #7a766f; font-size: 10.5px; }
+    .actions { display: flex; gap: 7px; }
+  </style>
+</head>
+<body>
+  <div class="desktop">
+    <div class="app-window window">
+      <div class="titlebar">
+        <div class="titlebar-label"><span class="v-mark">V</span><span>新建下载</span></div>
+        <div class="win-actions" aria-hidden="true"><span class="win-action"><svg viewBox="0 0 12 12"><path d="M2 6h8" stroke="currentColor"/></svg></span><span class="win-action"><svg viewBox="0 0 12 12"><rect x="2" y="2" width="8" height="8" fill="none" stroke="currentColor"/></svg></span><span class="win-action close"><svg viewBox="0 0 12 12"><path d="m2 2 8 8m0-8-8 8" stroke="currentColor"/></svg></span></div>
+      </div>
+      <main class="body">
+        <h1>粘贴一个下载链接</h1>
+        <p class="sub">Volant 会先确认文件名、大小和续传能力。</p>
+        <label class="url">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#5f5b55" stroke-width="1.6"><path d="M10 13a5 5 0 0 0 7.54.54l2-2a5 5 0 0 0-7.07-7.07l-1.15 1.15"/><path d="M14 11a5 5 0 0 0-7.54-.54l-2 2a5 5 0 0 0 7.07 7.07l1.15-1.15"/></svg>
+          <input aria-label="下载链接" value="https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/debian-13.2.0-amd64-netinst.iso">
+        </label>
+        <div class="hint">支持 HTTP、HTTPS、magnet，也可以拖入 .torrent 文件</div>
+        <section class="receipt">
+          <div class="receipt-head"><strong>文件回执</strong><span class="status active">可下载</span></div>
+          <div class="file">
+            <span class="file-icon"><svg width="26" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M7 2h7l4 4v16H7z"/><path d="M14 2v5h5M10 12h5M10 16h5"/></svg></span>
+            <div><div class="file-name">debian-13.2.0-amd64-netinst.iso</div><div class="file-origin">cdimage.debian.org</div></div>
+          </div>
+          <div class="meta">
+            <div><span>文件大小</span><b class="mono">682 MB</b></div>
+            <div><span>连接建议</span><b>8 条 · 支持分段</b></div>
+            <div><span>断点续传</span><b>可用</b></div>
+            <div><span>预计速度</span><b class="mono">18.7 MB/s</b></div>
+          </div>
+        </section>
+        <div class="destination">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#65615b" stroke-width="1.6"><path d="M3 6a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
+          <span class="mono">C:\Users\Evan\Downloads</span><button>更改</button>
+        </div>
+      </main>
+      <footer class="footer"><span>按 Enter 开始下载</span><div class="actions"><button class="secondary-button">取消</button><button class="primary-button">开始下载</button></div></footer>
+    </div>
+  </div>
+</body>
+</html>

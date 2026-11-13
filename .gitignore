@@ -1,6 +1,8 @@
 /target/
 /crates/app-gpui/target/
 /dist/
+/.impeccable/
+/.oil-ui/
 
 *.log
 *.zip

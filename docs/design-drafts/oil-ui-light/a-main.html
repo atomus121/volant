@@ -1,0 +1,354 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>页边 · File Page</title>
+  <link rel="stylesheet" href="common.css">
+  <style>
+    body {
+      color: #141414;
+      background: #ffffff;
+      font-size: 14px;
+    }
+    .app-window { background: #ffffff; }
+    .titlebar { background: #ffffff; }
+    .topbar {
+      height: 58px;
+      flex: 0 0 58px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      padding: 0 40px;
+      border-bottom: 1px solid #e8e7e3;
+    }
+    .filters { display: flex; align-items: center; gap: 27px; }
+    .filter {
+      position: relative;
+      height: 58px;
+      border: 0;
+      padding: 0;
+      color: #77736d;
+      background: transparent;
+      font-size: 13px;
+    }
+    .filter.active { color: #111111; font-weight: 600; }
+    .filter.active::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: -1px;
+      height: 2px;
+      background: #111111;
+    }
+    .top-actions { display: flex; align-items: center; gap: 16px; }
+    .capture {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      color: #68645e;
+      font-size: 12px;
+    }
+    .speed {
+      color: #171717;
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .content {
+      width: min(1180px, calc(100vw - 120px));
+      margin: 0 auto;
+      padding: 44px 0 35px;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+    .page-head {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 24px;
+      padding-bottom: 27px;
+    }
+    h1 {
+      margin: 0;
+      font-family: "Segoe UI Variable Display", "Segoe UI", "Microsoft YaHei UI", sans-serif;
+      font-size: 36px;
+      line-height: 1.1;
+      font-weight: 620;
+      letter-spacing: -.035em;
+    }
+    .page-sub {
+      margin-top: 9px;
+      color: #77736d;
+      font-size: 13px;
+    }
+    .page-summary {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      color: #77736d;
+      font-size: 12px;
+    }
+    .page-summary b { color: #151515; font-weight: 600; }
+    .summary-rule { width: 1px; height: 13px; background: #d9d7d1; }
+    .download-list { border-top: 1px solid #dddcd7; }
+    .row {
+      min-height: 68px;
+      display: grid;
+      grid-template-columns: minmax(350px, 1fr) 190px 105px 106px;
+      align-items: center;
+      gap: 20px;
+      padding: 10px 2px;
+      border-bottom: 1px solid #e7e5e0;
+    }
+    .row-main { min-width: 0; display: flex; align-items: center; gap: 13px; }
+    .file-glyph {
+      width: 28px;
+      height: 32px;
+      display: grid;
+      place-items: center;
+      color: #6c6861;
+    }
+    .name-wrap { min-width: 0; }
+    .file-name {
+      overflow: hidden;
+      color: #191919;
+      font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", sans-serif;
+      font-size: 14px;
+      font-weight: 580;
+      line-height: 1.35;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .file-meta {
+      margin-top: 4px;
+      color: #6f6b65;
+      font-size: 11.5px;
+    }
+    .mini-progress { display: grid; grid-template-columns: 1fr 36px; align-items: center; gap: 10px; }
+    .rail { height: 3px; border-radius: 10px; background: #e4e2dd; overflow: hidden; }
+    .rail i { display: block; height: 100%; width: var(--p); background: #171717; }
+    .row .pct { color: #5d5a55; font-size: 11px; text-align: right; }
+    .row .size { color: #66625c; font-size: 12px; }
+    .row .actions { justify-self: end; color: #6c6861; font-size: 12px; }
+    .row.active {
+      display: block;
+      min-height: 176px;
+      padding: 22px 2px 20px;
+      background: #ffffff;
+    }
+    .active-top {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: start;
+      gap: 30px;
+    }
+    .active-name {
+      display: flex;
+      align-items: flex-start;
+      gap: 14px;
+    }
+    .active-name .file-glyph { width: 35px; height: 40px; color: #171717; }
+    .active-name h2 {
+      margin: 0;
+      font-family: "Segoe UI Variable Display", "Segoe UI", "Microsoft YaHei UI", sans-serif;
+      font-size: 24px;
+      line-height: 1.25;
+      font-weight: 600;
+      letter-spacing: -.025em;
+    }
+    .active-name p {
+      margin: 6px 0 0;
+      color: #77736d;
+      font-size: 12px;
+    }
+    .active-percent {
+      display: flex;
+      align-items: baseline;
+      gap: 7px;
+      color: #181818;
+    }
+    .active-percent strong {
+      font-family: "Cascadia Mono", "Consolas", monospace;
+      font-size: 25px;
+      font-weight: 500;
+    }
+    .active-percent span { color: #78746e; font-size: 11px; }
+    .big-rail {
+      height: 7px;
+      margin: 21px 0 17px;
+      overflow: hidden;
+      border-radius: 99px;
+      background: #e3e1dc;
+    }
+    .big-rail i {
+      display: block;
+      width: 61%;
+      height: 100%;
+      background: #161616;
+    }
+    .active-meta {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr) auto;
+      align-items: center;
+      gap: 0;
+    }
+    .metric { padding-right: 25px; border-right: 1px solid #e5e3de; }
+    .metric + .metric { padding-left: 25px; }
+    .metric span { display: block; color: #6f6b65; font-size: 10.5px; }
+    .metric b {
+      display: block;
+      margin-top: 5px;
+      color: #202020;
+      font-size: 12px;
+      font-weight: 580;
+    }
+    .active-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 6px;
+      padding-left: 24px;
+    }
+    .list-end {
+      margin-top: auto;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      color: #6f6b65;
+      font-size: 11px;
+    }
+    .capture-dot {
+      display: inline-block;
+      width: 6px;
+      height: 6px;
+      margin-right: 5px;
+      border: 1px solid #62605b;
+      border-radius: 50%;
+    }
+  </style>
+</head>
+<body>
+  <div class="desktop">
+    <div class="app-window">
+      <div class="titlebar">
+        <div class="titlebar-label"><span class="v-mark">V</span><span>Volant</span></div>
+        <div class="win-actions" aria-hidden="true">
+          <span class="win-action"><svg viewBox="0 0 12 12"><path d="M2 6h8" stroke="currentColor"/></svg></span>
+          <span class="win-action"><svg viewBox="0 0 12 12"><rect x="2" y="2" width="8" height="8" fill="none" stroke="currentColor"/></svg></span>
+          <span class="win-action close"><svg viewBox="0 0 12 12"><path d="m2 2 8 8m0-8-8 8" stroke="currentColor"/></svg></span>
+        </div>
+      </div>
+      <div class="topbar">
+        <nav class="filters" aria-label="任务筛选">
+          <button class="filter active">全部 5</button>
+          <button class="filter">进行中 2</button>
+          <button class="filter">已完成 1</button>
+          <button class="filter">失败 1</button>
+        </nav>
+        <div class="top-actions">
+          <span class="capture"><i class="capture-dot"></i>浏览器捕获已开启</span>
+          <span class="speed mono">18.7 MB/s</span>
+          <button class="primary-button">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+            新建下载
+          </button>
+        </div>
+      </div>
+      <main class="content">
+        <header class="page-head">
+          <div>
+            <h1>下载</h1>
+            <div class="page-sub">五个文件，其中两个仍在队列中。</div>
+          </div>
+          <div class="page-summary">
+            <span>今日接收 <b>7</b></span><span class="summary-rule"></span>
+            <span>剩余 <b>约 14 秒</b></span><span class="summary-rule"></span>
+            <span>保存到 <b>Downloads</b></span>
+          </div>
+        </header>
+
+        <section class="download-list" aria-label="下载列表">
+          <article class="row active">
+            <div class="active-top">
+              <div class="active-name">
+                <span class="file-glyph">
+                  <svg width="28" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.35"><path d="M7 2h7l4 4v16H7z"/><path d="M14 2v5h5M10 12h5M10 16h5"/></svg>
+                </span>
+                <div>
+                  <h2>debian-13.2.0-amd64-netinst.iso</h2>
+                  <p>cdimage.debian.org · HTTP 分段下载 · 可断点续传</p>
+                </div>
+              </div>
+              <div class="active-percent"><strong>61%</strong><span>正在下载</span></div>
+            </div>
+            <div class="big-rail"><i></i></div>
+            <div class="active-meta">
+              <div class="metric"><span>已下载</span><b class="mono">421 MB / 682 MB</b></div>
+              <div class="metric"><span>速度</span><b class="mono">18.7 MB/s</b></div>
+              <div class="metric"><span>连接</span><b>8 条连接</b></div>
+              <div class="metric"><span>剩余时间</span><b>约 14 秒</b></div>
+              <div class="active-actions">
+                <button class="text-button">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 5v14M16 5v14"/></svg>
+                  暂停
+                </button>
+                <button class="text-button">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 6a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
+                  打开所在位置
+                </button>
+              </div>
+            </div>
+          </article>
+
+          <article class="row">
+            <div class="row-main">
+              <span class="file-glyph"><svg width="21" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M7 2h7l4 4v16H7z"/><path d="M14 2v5h5"/></svg></span>
+              <div class="name-wrap"><div class="file-name">openai-paper-collection.zip</div><div class="file-meta">等待当前任务释放连接</div></div>
+            </div>
+            <div class="mini-progress"><div class="rail"><i style="--p:0%"></i></div><span class="pct mono">0%</span></div>
+            <span class="size mono">128 MB</span>
+            <span class="actions"><span class="status queued">等待</span></span>
+          </article>
+
+          <article class="row">
+            <div class="row-main">
+              <span class="file-glyph"><svg width="21" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M7 2h7l4 4v16H7z"/><path d="M14 2v5h5"/></svg></span>
+              <div class="name-wrap"><div class="file-name">rustup-init.exe</div><div class="file-meta">分段状态已保存，可继续</div></div>
+            </div>
+            <div class="mini-progress"><div class="rail"><i style="--p:51%"></i></div><span class="pct mono">51%</span></div>
+            <span class="size mono">9.2 MB</span>
+            <span class="actions"><span class="status paused">已暂停</span></span>
+          </article>
+
+          <article class="row">
+            <div class="row-main">
+              <span class="file-glyph"><svg width="21" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M7 2h7l4 4v16H7z"/><path d="M14 2v5h5"/></svg></span>
+              <div class="name-wrap"><div class="file-name">ubuntu-26.04-desktop-amd64.iso</div><div class="file-meta">今天 09:42 完成</div></div>
+            </div>
+            <div class="mini-progress"><div class="rail"><i style="--p:100%"></i></div><span class="pct mono">100%</span></div>
+            <span class="size mono">3.5 GB</span>
+            <span class="actions"><span class="status done">已完成</span></span>
+          </article>
+
+          <article class="row">
+            <div class="row-main">
+              <span class="file-glyph"><svg width="21" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M7 2h7l4 4v16H7z"/><path d="M14 2v5h5"/></svg></span>
+              <div class="name-wrap"><div class="file-name">archive-dataset.tar.zst</div><div class="file-meta">服务器拒绝了连接</div></div>
+            </div>
+            <div class="mini-progress"><div class="rail"><i style="--p:9%"></i></div><span class="pct mono">9%</span></div>
+            <span class="size mono">940 MB</span>
+            <span class="actions"><span class="status failed">失败</span></span>
+          </article>
+        </section>
+
+        <div class="list-end">
+          <span>文件保存在 C:\Users\Evan\Downloads</span>
+          <span>单击任务可查看保存位置与连接状态</span>
+        </div>
+      </main>
+    </div>
+  </div>
+</body>
+</html>

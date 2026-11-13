@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>页边 · 设置</title>
+  <link rel="stylesheet" href="common.css">
+  <style>
+    body { background: #eeeeee; }
+    .app-window { width: 760px; height: 610px; }
+    .settings-tabs {
+      height: 52px;
+      flex: 0 0 52px;
+      display: flex;
+      align-items: center;
+      gap: 28px;
+      padding: 0 32px;
+      border-bottom: 1px solid #e4e3df;
+      background: #ffffff;
+    }
+    .settings-tab { align-self: stretch; border: 0; border-bottom: 2px solid transparent; padding: 0; color: #68645e; background: transparent; font-size: 12.5px; }
+    .settings-tab.active { color: #111111; border-color: #111111; font-weight: 600; }
+    .settings-main { flex: 1; min-height: 0; padding: 27px 32px 20px; overflow: hidden; }
+    h1 { margin: 0; font-size: 26px; line-height: 1.15; font-weight: 620; letter-spacing: -.025em; }
+    .sub { margin: 7px 0 22px; color: #6e6a64; font-size: 12px; line-height: 1.5; }
+    .group { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 22px; padding: 16px 0; border-top: 1px solid #dedcd7; }
+    .group h2 { margin: 0; color: #6f6b65; font-size: 11px; font-weight: 600; }
+    .rows { display: grid; }
+    .row { display: flex; align-items: center; justify-content: space-between; gap: 26px; min-height: 48px; padding: 6px 0; border-bottom: 1px solid #ebe9e5; }
+    .row:last-child { border-bottom: 0; }
+    .label strong { display: block; font-size: 12.5px; font-weight: 570; }
+    .label span { display: block; margin-top: 3px; color: #77736d; font-size: 10.5px; line-height: 1.45; }
+    .stepper { display: flex; height: 29px; align-items: center; border: 1px solid #d6d3cd; border-radius: 6px; overflow: hidden; background: #ffffff; }
+    .stepper button { width: 28px; height: 100%; border: 0; color: #66615b; background: transparent; cursor: pointer; }
+    .stepper output { width: 32px; color: #171717; font-size: 12px; text-align: center; }
+    .select { min-width: 118px; height: 29px; padding: 0 8px; border: 1px solid #d6d3cd; border-radius: 6px; color: #242424; background: #ffffff; font-size: 11.5px; }
+    .path { display: flex; gap: 6px; }
+    .path input { width: 242px; height: 29px; padding: 0 8px; border: 1px solid #d6d3cd; border-radius: 6px; color: #5f5b55; background: #ffffff; font-size: 10.5px; }
+    .path button { width: 31px; height: 29px; border: 1px solid #d6d3cd; border-radius: 6px; background: #ffffff; }
+    .switch { width: 32px; height: 18px; padding: 2px; border: 0; border-radius: 99px; background: #cdcac5; }
+    .switch::after { content: ""; display: block; width: 14px; height: 14px; border-radius: 50%; background: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,.2); }
+    .switch.on { background: #171717; }
+    .switch.on::after { transform: translateX(14px); }
+    .seg { display: inline-flex; padding: 2px; border: 1px solid #d6d3cd; border-radius: 6px; }
+    .seg button { height: 23px; border: 0; border-radius: 4px; padding: 0 8px; color: #6d6862; background: transparent; font-size: 10.5px; }
+    .seg button.active { color: #111111; background: #efeeeb; }
+    .footer { height: 45px; flex: 0 0 45px; display: flex; align-items: center; justify-content: space-between; padding: 0 32px; border-top: 1px solid #e3e1dc; color: #75716b; font-size: 10.5px; }
+    .footer span::before { content: ""; display: inline-block; width: 5px; height: 5px; margin-right: 6px; border-radius: 50%; background: #2d6a52; vertical-align: 1px; }
+    .footer button { border: 0; color: #59554f; background: transparent; font-size: 10.5px; }
+  </style>
+</head>
+<body>
+  <div class="desktop">
+    <div class="app-window window">
+      <div class="titlebar">
+        <div class="titlebar-label"><span class="v-mark">V</span><span>Volant · 设置</span></div>
+        <div class="win-actions" aria-hidden="true"><span class="win-action"><svg viewBox="0 0 12 12"><path d="M2 6h8" stroke="currentColor"/></svg></span><span class="win-action"><svg viewBox="0 0 12 12"><rect x="2" y="2" width="8" height="8" fill="none" stroke="currentColor"/></svg></span><span class="win-action close"><svg viewBox="0 0 12 12"><path d="m2 2 8 8m0-8-8 8" stroke="currentColor"/></svg></span></div>
+      </div>
+      <nav class="settings-tabs" aria-label="设置分类">
+        <button class="settings-tab active">下载</button>
+        <button class="settings-tab">连接</button>
+        <button class="settings-tab">浏览器捕获</button>
+        <button class="settings-tab">外观</button>
+      </nav>
+      <main class="settings-main">
+        <h1>下载</h1>
+        <p class="sub">这些设置影响之后加入的任务。正在下载的文件会保持当前连接数。</p>
+        <section class="group">
+          <h2>队列</h2>
+          <div class="rows">
+            <div class="row"><div class="label"><strong>同时下载</strong><span>达到上限后，新任务会停在这里。</span></div><div class="stepper"><button>−</button><output class="mono">3</output><button>+</button></div></div>
+            <div class="row"><div class="label"><strong>每个任务使用连接</strong><span>站点限流时会自动降低。</span></div><div class="stepper"><button>−</button><output class="mono">8</output><button>+</button></div></div>
+          </div>
+        </section>
+        <section class="group">
+          <h2>保存</h2>
+          <div class="rows">
+            <div class="row"><div class="label"><strong>下载目录</strong><span>目录不可写时会保留输入并说明原因。</span></div><div class="path"><input class="mono" value="C:\Users\Evan\Downloads"><button aria-label="选择下载目录"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 6a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg></button></div></div>
+            <div class="row"><div class="label"><strong>下载限速</strong><span>设为“不限”时使用当前可用带宽。</span></div><select class="select"><option>不限</option><option>10 MB/s</option></select></div>
+          </div>
+        </section>
+        <section class="group">
+          <h2>捕获</h2>
+          <div class="rows">
+            <div class="row"><div class="label"><strong>监视剪贴板</strong><span>识别到链接时打开新建下载窗口。</span></div><button class="switch on" aria-label="监视剪贴板"></button></div>
+            <div class="row"><div class="label"><strong>主题</strong><span>白色主界面，状态色只保留必要的含义。</span></div><div class="seg"><button class="active">系统</button><button>浅色</button><button>深色</button></div></div>
+          </div>
+        </section>
+      </main>
+      <footer class="footer"><span>所有更改自动保存</span><button>打开配置目录</button></footer>
+    </div>
+  </div>
+</body>
+</html>

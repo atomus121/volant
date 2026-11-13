@@ -1,0 +1,1146 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Volant · Dual Theme Studies</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", sans-serif;
+      --board-bg: #e8eaec;
+      --board-surface: #f8f9f9;
+      --board-ink: #111416;
+      --board-muted: #59626a;
+      --board-line: #d4d8db;
+      --board-accent: #1d5bc4;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; height: 100%; }
+    body { min-width: 1180px; overflow: hidden; background: var(--board-bg); color: var(--board-ink); }
+    button, input, select { font: inherit; }
+    button { color: inherit; }
+    svg { display: block; flex: 0 0 auto; }
+    .sr-only {
+      position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+      overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+    }
+    button:focus-visible, input:focus-visible, select:focus-visible {
+      outline: 2px solid var(--board-accent);
+      outline-offset: 2px;
+    }
+
+    .board {
+      width: min(1600px, calc(100vw - 36px));
+      height: calc(100vh - 36px);
+      margin: 18px auto;
+      display: grid;
+      grid-template-rows: auto auto minmax(0, 1fr);
+      gap: 13px;
+    }
+    .masthead {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 24px;
+      padding: 0 2px;
+    }
+    .masthead h1 {
+      margin: 0;
+      font-size: 24px;
+      line-height: 1.1;
+      font-weight: 650;
+      letter-spacing: -.025em;
+    }
+    .masthead p {
+      margin: 7px 0 0;
+      color: var(--board-muted);
+      font-size: 12.5px;
+    }
+    .meta {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      color: var(--board-muted);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .mark {
+      width: 31px;
+      height: 31px;
+      display: grid;
+      place-items: center;
+      border: 1px solid #c9cdd0;
+      border-radius: 9px;
+      color: #fff;
+      background: #15191d;
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .direction-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; }
+    .direction-card {
+      appearance: none;
+      min-width: 0;
+      display: grid;
+      grid-template-columns: 40px 1fr auto;
+      align-items: center;
+      gap: 11px;
+      padding: 10px 12px;
+      border: 1px solid transparent;
+      border-radius: 11px;
+      color: var(--board-ink);
+      background: rgba(250,250,249,.72);
+      text-align: left;
+      cursor: pointer;
+    }
+    .direction-card:hover { background: #fff; }
+    .direction-card.active { border-color: #a8afb5; background: #fff; box-shadow: 0 5px 17px rgba(22,29,36,.07); }
+    .direction-index {
+      width: 40px;
+      height: 40px;
+      display: grid;
+      place-items: center;
+      border-radius: 10px;
+      font-size: 12px;
+      font-weight: 750;
+      letter-spacing: .02em;
+    }
+    .direction-copy { min-width: 0; }
+    .direction-copy strong { display: block; color: #14181b; font-size: 12.5px; font-weight: 650; }
+    .direction-copy span {
+      display: block;
+      margin-top: 3px;
+      overflow: hidden;
+      color: #6c737a;
+      font-size: 10.5px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .pair { display: flex; gap: 3px; }
+    .pair i { width: 8px; height: 22px; border-radius: 3px; }
+
+    .stage {
+      min-height: 0;
+      display: grid;
+      grid-template-rows: 39px minmax(0, 1fr);
+      overflow: hidden;
+      border: 1px solid #b9bfc4;
+      border-radius: 14px;
+      background: #f4f5f5;
+    }
+    .stage-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 9px 0 12px;
+      border-bottom: 1px solid #cfd4d7;
+      background: #f8f9f9;
+    }
+    .screens, .theme-control { display: flex; align-items: center; gap: 3px; }
+    .screen-tab, .theme-button {
+      height: 28px;
+      border: 0;
+      border-radius: 6px;
+      padding: 0 10px;
+      color: #5f6870;
+      background: transparent;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .screen-tab:hover, .theme-button:hover { background: rgba(17,20,23,.05); }
+    .screen-tab.active, .theme-button.active { color: #15191c; background: #fff; box-shadow: 0 1px 4px rgba(17,22,28,.1); }
+    .theme-control { padding-left: 7px; border-left: 1px solid #d6dade; }
+    .theme-button { display: flex; align-items: center; gap: 6px; }
+    .theme-button span { font-size: 10.5px; }
+    .stage-canvas {
+      min-height: 0;
+      padding: 13px;
+      overflow: auto;
+      display: grid;
+      place-items: stretch;
+      background: #dfe2e4;
+    }
+
+    .prototype {
+      --bg: #fff;
+      --chrome: #f8f9fa;
+      --surface: #fff;
+      --panel: #f4f6f7;
+      --text: #111417;
+      --muted: #5d666e;
+      --faint: #657079;
+      --line: #dfe3e6;
+      --line-strong: #cbd2d7;
+      --primary: #151a1e;
+      --primary-text: #fff;
+      --accent: #1e5fd3;
+      --accent-soft: #e9f0ff;
+      --success: #176f57;
+      --warning: #8b631f;
+      --danger: #b3443f;
+      min-width: 0;
+      min-height: 0;
+      display: grid;
+      place-items: center;
+      color: var(--text);
+      font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", sans-serif;
+    }
+
+    .prototype[data-dir="blueprint"][data-theme="dark"] {
+      --bg: #0b1119;
+      --chrome: #0e151e;
+      --surface: #111a24;
+      --panel: #17222e;
+      --text: #f2f5f7;
+      --muted: #a9b4be;
+      --faint: #8f9ba7;
+      --line: #253240;
+      --line-strong: #35475a;
+      --primary: #e9f1fb;
+      --primary-text: #101721;
+      --accent: #7ca5ff;
+      --accent-soft: #182a49;
+      --success: #67cca7;
+      --warning: #e1b56a;
+      --danger: #ff8b84;
+    }
+    .prototype[data-dir="transit"][data-theme="dark"] {
+      --bg: #101311;
+      --chrome: #151916;
+      --surface: #1b201c;
+      --panel: #202720;
+      --text: #f0f3ee;
+      --muted: #b1b8af;
+      --faint: #919b91;
+      --line: #30392f;
+      --line-strong: #465247;
+      --primary: #edf4ed;
+      --primary-text: #111511;
+      --accent: #80d1b1;
+      --accent-soft: #19362c;
+      --success: #80d1b1;
+      --warning: #e2b36d;
+      --danger: #ff8e87;
+    }
+    .prototype[data-dir="folio"][data-theme="dark"] {
+      --bg: #141311;
+      --chrome: #191816;
+      --surface: #1d1c19;
+      --panel: #25231f;
+      --text: #f3f0ea;
+      --muted: #b3aea5;
+      --faint: #918c84;
+      --line: #38342e;
+      --line-strong: #4b463f;
+      --primary: #f3f0ea;
+      --primary-text: #181613;
+      --accent: #9db9ed;
+      --accent-soft: #252e40;
+      --success: #79bea8;
+      --warning: #d9ad6e;
+      --danger: #f08d85;
+    }
+
+    .app-window {
+      width: 100%;
+      height: 100%;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      border: 1px solid var(--line-strong);
+      border-radius: 10px;
+      color: var(--text);
+      background: var(--bg);
+      box-shadow: 0 18px 50px rgba(13,18,23,.16), 0 2px 8px rgba(13,18,23,.08);
+    }
+    .app-window.float { width: auto; height: auto; }
+    .titlebar {
+      height: 34px;
+      flex: 0 0 34px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-left: 12px;
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      background: var(--chrome);
+      user-select: none;
+    }
+    .title-name { display: flex; align-items: center; gap: 7px; font-size: 10.5px; font-weight: 600; }
+    .mini-mark {
+      width: 17px;
+      height: 17px;
+      display: grid;
+      place-items: center;
+      border-radius: 4px;
+      color: var(--primary-text);
+      background: var(--primary);
+      font-size: 8px;
+      font-weight: 800;
+    }
+    .win-controls { display: flex; height: 100%; }
+    .win-control { width: 39px; display: grid; place-items: center; border-left: 1px solid transparent; }
+    .win-control:hover { background: rgba(120,130,140,.12); }
+    .win-control.close:hover { color: #fff; background: #c44444; }
+    .win-control svg { width: 10px; height: 10px; }
+
+    .btn {
+      height: 31px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      border-radius: 7px;
+      padding: 0 11px;
+      font-size: 12.5px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .btn.primary { border: 1px solid var(--primary); color: var(--primary-text); background: var(--primary); }
+    .btn.primary:hover { filter: brightness(1.08); }
+    .btn.secondary { border: 1px solid var(--line-strong); color: var(--text); background: var(--surface); }
+    .btn.secondary:hover { background: var(--panel); }
+    .btn.ghost { border: 1px solid transparent; color: var(--muted); background: transparent; }
+    .btn.ghost:hover { color: var(--text); background: var(--panel); }
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+    .status.active { color: var(--accent); }
+    .status.queued { color: var(--faint); }
+    .status.paused { color: var(--warning); }
+    .status.done { color: var(--success); }
+    .status.failed { color: var(--danger); }
+    .mono { font-family: "Cascadia Mono", "Consolas", monospace; font-variant-numeric: tabular-nums; }
+    .switch {
+      width: 32px;
+      height: 18px;
+      padding: 2px;
+      border: 0;
+      border-radius: 99px;
+      background: var(--line-strong);
+      cursor: pointer;
+    }
+    .switch::after {
+      content: "";
+      display: block;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: var(--surface);
+      box-shadow: 0 1px 2px rgba(0,0,0,.18);
+    }
+    .switch.on { background: var(--primary); }
+    .switch.on::after { transform: translateX(14px); }
+
+    /* Shared rows */
+    .file {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .file-icon {
+      width: 27px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      flex: 0 0 27px;
+      color: var(--faint);
+    }
+    .file-copy { min-width: 0; }
+    .file-name {
+      overflow: hidden;
+      color: var(--text);
+      font-size: 13px;
+      font-weight: 580;
+      line-height: 1.35;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .file-sub {
+      margin-top: 3px;
+      overflow: hidden;
+      color: var(--faint);
+      font-size: 10.5px;
+      line-height: 1.3;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .track { height: 3px; overflow: hidden; border-radius: 20px; background: var(--line); }
+    .track i { display: block; width: var(--p); height: 100%; background: var(--primary); }
+
+    /* A · Draftline */
+    .draftline .toolbar {
+      height: 54px;
+      flex: 0 0 54px;
+      display: flex;
+      align-items: center;
+      gap: 24px;
+      padding: 0 24px;
+      border-bottom: 1px solid var(--line);
+      background: var(--surface);
+    }
+    .brand { min-width: 136px; display: flex; align-items: center; gap: 9px; font-size: 12px; font-weight: 650; }
+    .brand-mark {
+      width: 25px;
+      height: 25px;
+      display: grid;
+      place-items: center;
+      border-radius: 5px;
+      color: var(--primary-text);
+      background: var(--primary);
+      font-size: 11px;
+      font-weight: 800;
+    }
+    .tabs { align-self: stretch; display: flex; align-items: center; gap: 22px; }
+    .tab {
+      align-self: stretch;
+      border: 0;
+      border-bottom: 2px solid transparent;
+      padding: 0;
+      color: var(--muted);
+      background: transparent;
+      font-size: 11.5px;
+    }
+    .tab.active { color: var(--text); border-color: var(--primary); font-weight: 600; }
+    .toolbar-end { margin-left: auto; display: flex; align-items: center; gap: 13px; }
+    .draftline .body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 276px; }
+    .draft-main { min-width: 0; min-height: 0; padding: 23px 24px 18px; overflow: hidden; }
+    .draft-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; }
+    h1 { margin: 0; font-size: 25px; line-height: 1.15; font-weight: 630; letter-spacing: -.02em; }
+    .sub { margin: 6px 0 0; color: var(--muted); font-size: 10.5px; line-height: 1.45; }
+    .pulse { color: var(--muted); font-size: 10.5px; }
+    .pulse b { color: var(--text); font-size: 13px; font-weight: 600; }
+    .active-sheet { margin-top: 18px; padding: 15px 0 17px; border-top: 1px solid var(--line-strong); border-bottom: 1px solid var(--line); }
+    .sheet-title { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 18px; align-items: start; }
+    .sheet-title h2 { margin: 0; font-size: 20px; line-height: 1.25; font-weight: 600; letter-spacing: -.02em; }
+    .sheet-title p { margin: 5px 0 0; color: var(--muted); font-size: 10.5px; }
+    .pct {
+      color: var(--text);
+      font-family: "Cascadia Mono", "Consolas", monospace;
+      font-size: 24px;
+      line-height: 1;
+      font-weight: 500;
+    }
+    .ruler {
+      position: relative;
+      height: 9px;
+      margin-top: 17px;
+      overflow: hidden;
+      background:
+        repeating-linear-gradient(90deg, var(--line) 0 1px, transparent 1px 12px),
+        var(--panel);
+    }
+    .ruler span {
+      display: block;
+      width: 61%;
+      height: 100%;
+      background:
+        repeating-linear-gradient(90deg, var(--accent) 0 1px, transparent 1px 12px),
+        color-mix(in srgb, var(--accent) 35%, var(--bg));
+    }
+    .metrics { display: grid; grid-template-columns: repeat(4, 1fr); margin-top: 15px; }
+    .metric { padding-right: 17px; border-right: 1px solid var(--line); }
+    .metric + .metric { padding-left: 17px; }
+    .metric span { display: block; color: var(--faint); font-size: 10.5px; }
+    .metric b { display: block; margin-top: 4px; color: var(--text); font-size: 12px; font-weight: 550; }
+    .sheet-actions { display: flex; gap: 6px; margin-top: 14px; }
+    .queue-head {
+      height: 31px;
+      display: grid;
+      grid-template-columns: minmax(250px, 1fr) 130px 70px 70px;
+      align-items: center;
+      gap: 12px;
+      color: var(--faint);
+      font-size: 10.5px;
+    }
+    .queue-row {
+      min-height: 54px;
+      display: grid;
+      grid-template-columns: minmax(250px, 1fr) 130px 70px 70px;
+      align-items: center;
+      gap: 12px;
+      border-top: 1px solid var(--line);
+    }
+    .mini-progress { display: grid; grid-template-columns: 1fr 31px; gap: 7px; align-items: center; }
+    .mini-progress span { color: var(--muted); font-size: 10.5px; text-align: right; }
+    .size { color: var(--muted); font-size: 11px; }
+    .draft-rail {
+      min-width: 0;
+      padding: 20px 18px;
+      border-left: 1px solid var(--line);
+      background: var(--panel);
+    }
+    .rail-title { display: flex; align-items: center; justify-content: space-between; color: var(--faint); font-size: 9.5px; }
+    .rail-figure { margin-top: 15px; padding: 14px 0 13px; border-top: 1px solid var(--line-strong); border-bottom: 1px solid var(--line); }
+    .rail-figure h3 { margin: 0 0 13px; font-size: 10.5px; font-weight: 620; }
+    .conn-bars { height: 57px; display: flex; align-items: end; gap: 5px; }
+    .conn-bars i { flex: 1; height: var(--h); background: var(--primary); opacity: var(--o); }
+    .rail-kv { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; color: var(--muted); font-size: 10px; }
+    .rail-kv b { color: var(--text); font-weight: 540; }
+    .rail-actions { margin-top: auto; display: grid; gap: 6px; }
+    .rail-note {
+      margin-top: 17px;
+      padding-top: 13px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 9.5px;
+      line-height: 1.55;
+    }
+
+    /* B · Transit */
+    .transit .transit-top {
+      height: 58px;
+      flex: 0 0 58px;
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      padding: 0 22px;
+      border-bottom: 1px solid var(--line);
+      background: var(--surface);
+    }
+    .transit-nav { display: flex; align-items: center; gap: 19px; }
+    .transit-nav button { border: 0; padding: 0; color: var(--muted); background: transparent; font-size: 12px; }
+    .transit-nav button.active { color: var(--text); font-weight: 600; }
+    .transit-body { flex: 1; min-height: 0; display: flex; }
+    .transit-rail {
+      width: 164px;
+      flex: 0 0 164px;
+      padding: 17px 10px 12px;
+      border-right: 1px solid var(--line);
+      background: var(--chrome);
+    }
+    .transit-rail .brand { padding: 0 6px 15px; min-width: 0; }
+    .rail-btn {
+      width: 100%;
+      height: 33px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 9px;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      color: var(--muted);
+      background: transparent;
+      font-size: 11.5px;
+      text-align: left;
+    }
+    .rail-btn.active { color: var(--text); background: var(--panel); border-color: var(--line); }
+    .rail-btn .count { margin-left: auto; color: var(--faint); font-size: 9px; }
+    .transit-content { flex: 1; min-width: 0; padding: 22px 28px 16px; overflow: hidden; }
+    .transit-head { display: flex; align-items: end; justify-content: space-between; gap: 20px; }
+    .service-line {
+      margin-top: 17px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 24px;
+      align-items: center;
+      padding: 15px 0 17px;
+      border-top: 1px solid var(--line-strong);
+      border-bottom: 1px solid var(--line);
+    }
+    .service-main { min-width: 0; }
+    .service-kicker { color: var(--accent); font-size: 10.5px; font-weight: 650; }
+    .service-main h2 { margin: 6px 0 0; font-size: 22px; line-height: 1.22; font-weight: 610; letter-spacing: -.025em; }
+    .service-source { margin-top: 5px; color: var(--muted); font-size: 11px; }
+    .route {
+      position: relative;
+      height: 42px;
+      margin-top: 17px;
+      display: grid;
+      grid-template-columns: repeat(8, 1fr);
+      align-items: center;
+    }
+    .route::before {
+      content: "";
+      position: absolute;
+      left: 5px;
+      right: 5px;
+      top: 50%;
+      height: 2px;
+      background: var(--line);
+    }
+    .route::after {
+      content: "";
+      position: absolute;
+      left: 5px;
+      top: 50%;
+      width: 57%;
+      height: 2px;
+      background: var(--accent);
+    }
+    .stop {
+      position: relative;
+      z-index: 1;
+      justify-self: center;
+      width: 10px;
+      height: 10px;
+      border: 2px solid var(--surface);
+      border-radius: 50%;
+      background: var(--line-strong);
+      box-shadow: 0 0 0 1px var(--line);
+    }
+    .stop.done { background: var(--accent); }
+    .stop.live { width: 14px; height: 14px; background: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+    .service-side { width: 174px; display: grid; gap: 6px; align-content: center; }
+    .service-side .kv { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; }
+    .service-side .kv b { color: var(--text); font-weight: 550; }
+    .transit-list { margin-top: 11px; border-top: 1px solid var(--line); }
+    .transit-row {
+      min-height: 55px;
+      display: grid;
+      grid-template-columns: minmax(245px,1fr) 175px 75px 88px;
+      gap: 14px;
+      align-items: center;
+      border-bottom: 1px solid var(--line);
+    }
+    .transit-progress { display: grid; grid-template-columns: 1fr 34px; gap: 8px; align-items: center; }
+    .transit-progress span { color: var(--muted); font-size: 9.5px; text-align: right; }
+    .bottom-info {
+      margin-top: 14px;
+      display: flex;
+      align-items: center;
+      gap: 13px;
+      color: var(--muted);
+      font-size: 10px;
+    }
+    .bottom-info b { color: var(--text); font-weight: 550; }
+    .bottom-dot { width: 1px; height: 12px; background: var(--line-strong); }
+
+    /* C · Folio */
+    .folio .folio-top {
+      height: 58px;
+      flex: 0 0 58px;
+      display: flex;
+      align-items: center;
+      gap: 26px;
+      padding: 0 28px;
+      border-bottom: 1px solid var(--line);
+      background: var(--surface);
+    }
+    .folio-nav { align-self: stretch; display: flex; align-items: center; gap: 21px; }
+    .folio-nav button { align-self: stretch; border: 0; border-bottom: 2px solid transparent; padding: 0; color: var(--muted); background: transparent; font-size: 11px; }
+    .folio-nav button.active { color: var(--text); border-color: var(--accent); font-weight: 600; }
+    .folio-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 350px minmax(0,1fr); }
+    .folio-index {
+      min-height: 0;
+      padding: 21px 16px 14px;
+      border-right: 1px solid var(--line);
+      background: var(--chrome);
+      overflow: hidden;
+    }
+    .folio-index-head { display: flex; align-items: end; justify-content: space-between; padding: 0 8px 15px; }
+    .folio-index h1 { font-size: 20px; }
+    .folio-index-count { color: var(--faint); font-size: 9.5px; }
+    .folio-row {
+      display: grid;
+      grid-template-columns: 26px minmax(0,1fr) auto;
+      align-items: center;
+      gap: 9px;
+      min-height: 59px;
+      padding: 8px 9px;
+      border-top: 1px solid var(--line);
+    }
+    .folio-row.active { background: var(--panel); border-color: var(--line-strong); }
+    .folio-row .file-icon { width: 24px; height: 27px; flex-basis: 24px; }
+    .folio-pct { color: var(--muted); font-size: 11px; }
+    .folio-sheet { min-width: 0; min-height: 0; padding: 30px 42px 24px; display: flex; flex-direction: column; background: var(--bg); }
+    .sheet-num { color: var(--faint); font-family: "Cascadia Mono", "Consolas", monospace; font-size: 10px; }
+    .folio-sheet h2 {
+      margin: 16px 0 7px;
+      max-width: 800px;
+      font-size: 30px;
+      line-height: 1.2;
+      font-weight: 560;
+      letter-spacing: -.035em;
+      text-wrap: pretty;
+    }
+    .folio-sheet .source { color: var(--muted); font-size: 11px; }
+    .folio-progress {
+      margin-top: 27px;
+      padding: 17px 0 18px;
+      border-top: 1px solid var(--line-strong);
+      border-bottom: 1px solid var(--line);
+    }
+    .folio-progress-head { display: flex; align-items: end; justify-content: space-between; gap: 20px; }
+    .folio-progress-head strong { font-family: "Cascadia Mono", "Consolas", monospace; font-size: 26px; font-weight: 500; }
+    .folio-progress-head span { color: var(--muted); font-size: 10px; }
+    .folio-bar { height: 5px; margin-top: 14px; background: var(--line); }
+    .folio-bar span { display: block; width: 61%; height: 100%; background: var(--accent); }
+    .folio-metric-row { display: grid; grid-template-columns: repeat(4,1fr); margin-top: 14px; }
+    .folio-metric { padding-right: 15px; border-right: 1px solid var(--line); }
+    .folio-metric + .folio-metric { padding-left: 15px; }
+    .folio-metric span { display: block; color: var(--faint); font-size: 9px; }
+    .folio-metric b { display: block; margin-top: 4px; color: var(--text); font-size: 11px; font-weight: 550; }
+    .folio-actions { display: flex; gap: 7px; margin-top: 17px; }
+    .folio-info {
+      margin-top: 22px;
+      display: grid;
+      grid-template-columns: 1.4fr 1fr;
+      gap: 26px;
+      padding-top: 15px;
+      border-top: 1px solid var(--line);
+    }
+    .folio-info h3 { margin: 0 0 9px; color: var(--faint); font-size: 9px; font-weight: 650; }
+    .folio-info p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.55; }
+    .folio-path { overflow-wrap: anywhere; color: var(--text); font-size: 9.5px; line-height: 1.55; }
+    .folio-foot {
+      margin-top: auto;
+      display: flex;
+      justify-content: space-between;
+      padding-top: 17px;
+      color: var(--faint);
+      font-size: 9.5px;
+    }
+
+    /* Settings, all directions */
+    .settings-blueprint { width: 820px; height: 610px; }
+    .settings-transit { width: 790px; height: 610px; }
+    .settings-folio { width: 800px; height: 620px; }
+    .settings-body { flex: 1; min-height: 0; display: flex; }
+    .settings-nav {
+      width: 184px;
+      flex: 0 0 184px;
+      padding: 20px 10px 14px;
+      border-right: 1px solid var(--line);
+      background: var(--chrome);
+    }
+    .settings-nav-title { margin: 0 9px 12px; color: var(--faint); font-size: 10px; font-weight: 650; }
+    .settings-main { flex: 1; min-width: 0; min-height: 0; padding: 23px 25px 18px; overflow: hidden; background: var(--bg); }
+    .settings-main h1 { font-size: 23px; }
+    .settings-main .sub { margin-bottom: 16px; }
+    .setting-group { margin-top: 13px; border-top: 1px solid var(--line); }
+    .setting-group h2 { margin: 10px 0 5px; color: var(--faint); font-size: 10.5px; font-weight: 650; }
+    .setting-row {
+      min-height: 47px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 22px;
+      border-bottom: 1px solid var(--line);
+    }
+    .setting-row:last-child { border-bottom: 0; }
+    .setting-label strong { display: block; font-size: 12.5px; font-weight: 580; }
+    .setting-label span { display: block; margin-top: 3px; color: var(--muted); font-size: 10.5px; line-height: 1.4; }
+    .stepper { height: 28px; display: flex; align-items: center; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--surface); }
+    .stepper button { width: 27px; height: 100%; border: 0; color: var(--muted); background: transparent; }
+    .stepper output { width: 30px; color: var(--text); font-size: 11.5px; text-align: center; }
+    .select { height: 28px; min-width: 112px; padding: 0 7px; border: 1px solid var(--line-strong); border-radius: 5px; color: var(--text); background: var(--surface); font-size: 11px; }
+    .path { display: flex; gap: 5px; }
+    .path input { width: 230px; height: 28px; padding: 0 7px; border: 1px solid var(--line-strong); border-radius: 5px; color: var(--muted); background: var(--surface); font-size: 10px; }
+    .path button { width: 29px; height: 28px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--surface); }
+    .seg { display: inline-flex; padding: 2px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--chrome); }
+    .seg button { height: 22px; border: 0; border-radius: 3px; padding: 0 8px; color: var(--muted); background: transparent; font-size: 10.5px; }
+    .seg button.active { color: var(--text); background: var(--surface); }
+    .settings-footer {
+      height: 42px;
+      flex: 0 0 42px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 19px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      background: var(--surface);
+      font-size: 10.5px;
+    }
+    .settings-footer span::before { content: ""; display: inline-block; width: 5px; height: 5px; margin-right: 6px; border-radius: 50%; background: var(--success); vertical-align: 1px; }
+    .settings-footer button { border: 0; color: var(--muted); background: transparent; font-size: 10.5px; }
+    .transit-settings-layout { flex: 1; min-width: 0; display: grid; grid-template-columns: minmax(0,1fr) 230px; }
+    .settings-transit .settings-main { padding: 20px 23px; }
+    .transit-side-card { padding: 18px 14px; border-left: 1px solid var(--line); background: var(--panel); }
+    .transit-side-card h2 { margin: 0 0 12px; color: var(--faint); font-size: 9px; font-weight: 650; }
+    .transit-preview { padding: 12px; border: 1px solid var(--line); background: var(--surface); }
+    .transit-preview-title { font-size: 10.5px; line-height: 1.45; }
+    .transit-preview .kv { display: flex; justify-content: space-between; margin-top: 7px; color: var(--muted); font-size: 9px; }
+    .transit-preview .kv b { color: var(--text); font-weight: 550; }
+    .transit-preview .route { height: 28px; margin-top: 10px; }
+    .transit-preview .stop { width: 7px; height: 7px; }
+    .folio-settings .settings-body { background: var(--bg); }
+    .folio-settings .settings-nav { width: 190px; flex-basis: 190px; border: 0; background: var(--panel); }
+    .folio-settings .settings-main { padding: 24px 27px; }
+    .folio-settings .setting-row { min-height: 51px; }
+
+    /* New download, all directions */
+    .add-blueprint { width: 680px; height: 480px; }
+    .add-transit { width: 700px; height: 500px; }
+    .add-folio { width: 670px; height: 490px; }
+    .add-body { flex: 1; min-height: 0; padding: 24px 27px 0; display: flex; flex-direction: column; background: var(--bg); }
+    .add-body h1 { font-size: 24px; }
+    .add-body .sub { margin-bottom: 17px; }
+    .url-shell {
+      height: 40px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 10px;
+      border: 1px solid var(--line-strong);
+      border-radius: 7px;
+      background: var(--surface);
+    }
+    .url-shell.focused { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+    .url-shell input { flex: 1; min-width: 0; border: 0; outline: 0; color: var(--text); background: transparent; font-size: 10.5px; }
+    .url-note { margin: 7px 0 16px; color: var(--muted); font-size: 10.5px; }
+    .probe {
+      border-top: 1px solid var(--line-strong);
+      border-bottom: 1px solid var(--line);
+      padding: 13px 0 14px;
+    }
+    .probe-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--faint); font-size: 9.5px; }
+    .probe-file { margin-top: 11px; }
+    .probe-file .file-name { font-size: 12.5px; }
+    .probe-file .file-sub { font-size: 9.5px; }
+    .probe-meta { display: grid; grid-template-columns: repeat(3,1fr); gap: 13px; margin-top: 13px; padding-top: 12px; border-top: 1px solid var(--line); }
+    .probe-meta span { display: block; color: var(--faint); font-size: 9.5px; }
+    .probe-meta b { display: block; margin-top: 3px; color: var(--text); font-size: 11px; font-weight: 550; }
+    .destination { display: flex; align-items: center; gap: 8px; margin-top: 13px; color: var(--muted); font-size: 10.5px; }
+    .destination span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .destination button { border: 0; color: var(--text); background: transparent; font-size: 10.5px; }
+    .add-footer { height: 53px; flex: 0 0 53px; margin-top: auto; display: flex; align-items: center; justify-content: space-between; border-top: 1px solid var(--line); }
+    .add-footer span { color: var(--muted); font-size: 9.5px; }
+    .add-actions { display: flex; gap: 7px; }
+    .transit-add-tabs { height: 33px; display: flex; gap: 20px; border-bottom: 1px solid var(--line); margin-bottom: 13px; }
+    .transit-add-tabs button { border: 0; border-bottom: 2px solid transparent; padding: 0; color: var(--muted); background: transparent; font-size: 10.5px; }
+    .transit-add-tabs button.active { border-color: var(--accent); color: var(--text); font-weight: 600; }
+    .transit-add-grid { display: grid; grid-template-columns: minmax(0,1fr) 210px; gap: 18px; }
+    .add-side-box { padding-left: 17px; border-left: 1px solid var(--line); }
+    .add-side-box h2 { margin: 0 0 9px; color: var(--faint); font-size: 9px; font-weight: 650; }
+    .add-side-box .kv { display: flex; justify-content: space-between; margin-top: 7px; color: var(--muted); font-size: 9px; }
+    .add-side-box .kv b { color: var(--text); font-weight: 550; }
+    .add-side-box .route { height: 45px; margin-top: 14px; }
+    .folio-add .add-layout { display: grid; grid-template-columns: minmax(0,1fr) 190px; gap: 21px; margin-top: 3px; }
+    .folio-add .destination-panel { padding-left: 18px; border-left: 1px solid var(--line); }
+    .folio-add .destination-panel h2 { margin: 0 0 9px; color: var(--faint); font-size: 9px; font-weight: 650; }
+    .folio-add .path-copy { color: var(--text); font-size: 9.5px; line-height: 1.55; overflow-wrap: anywhere; }
+    .folio-add .space { margin-top: 7px; color: var(--muted); font-size: 9px; }
+    .folio-add .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); color: var(--muted); font-size: 9.5px; }
+
+    body.export { background: #fff; }
+    body.export .board { width: 100vw; height: 100vh; margin: 0; display: block; }
+    body.export .masthead, body.export .direction-row, body.export .stage-bar { display: none; }
+    body.export .stage { height: 100vh; border: 0; border-radius: 0; display: block; }
+    body.export .stage-canvas { height: 100vh; padding: 0; background: #e9ebed; }
+    body.export .prototype { width: 100%; height: 100%; }
+
+    @media (max-width: 1320px) {
+      .board { width: calc(100vw - 24px); height: calc(100vh - 24px); margin: 12px auto; }
+      .direction-copy span { max-width: 260px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { transition-duration: .001ms !important; animation-duration: .001ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <main class="board">
+    <header class="masthead">
+      <div>
+        <h1>Volant · 双主题方向研究</h1>
+        <p>同一结构、两套主题、三块核心窗口 · 1440×900 桌面基准</p>
+      </div>
+      <div class="meta"><span class="mark">V</span><span>GPUI · light / dark</span></div>
+    </header>
+    <nav class="direction-row" id="direction-row" aria-label="设计方向"></nav>
+    <section class="stage">
+      <div class="stage-bar">
+        <div class="screens" id="screen-tabs"></div>
+        <div class="theme-control" id="theme-control"></div>
+      </div>
+      <div class="stage-canvas" id="stage"></div>
+    </section>
+  </main>
+  <script>
+    const icons = {
+      plus: '<path d="M12 5v14M5 12h14"/>',
+      download: '<path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M5 21h14"/>',
+      pause: '<path d="M8 5v14M16 5v14"/>',
+      play: '<path d="m8 5 11 7-11 7Z"/>',
+      file: '<path d="M7 2h7l4 4v16H7z"/><path d="M14 2v5h5"/>',
+      folder: '<path d="M3 6a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/>',
+      settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1v.1h-4v-.1a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1-.4h-.1v-4H3a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1v-.1h4V3a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.13.38.34.72.6 1 .28.27.62.46 1 .53h.1v4H21a1.7 1.7 0 0 0-1.6.47Z"/>',
+      list: '<path d="M4 6h16M4 12h16M4 18h16"/>',
+      check: '<path d="m5 12 4 4L19 6"/>',
+      fail: '<circle cx="12" cy="12" r="9"/><path d="m9 9 6 6m0-6-6 6"/>',
+      clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+      link: '<path d="M10 13a5 5 0 0 0 7.54.54l2-2a5 5 0 0 0-7.07-7.07l-1.15 1.15"/><path d="M14 11a5 5 0 0 0-7.54-.54l-2 2a5 5 0 0 0 7.07 7.07l1.15-1.15"/>',
+      more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
+      network: '<rect x="3" y="3" width="6" height="6" rx="1"/><rect x="15" y="15" width="6" height="6" rx="1"/><path d="M9 6h4a4 4 0 0 1 4 4v5"/>',
+      monitor: '<rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/>',
+      sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.66 6.34l1.41-1.41"/>',
+      moon: '<path d="M20 15.2A8.5 8.5 0 0 1 8.8 4 8.5 8.5 0 1 0 20 15.2Z"/>'
+    };
+    const icon = (name, size=14, width=1.7) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${width}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name]}</svg>`;
+    const statusText = {active:"下载中",queued:"等待",paused:"已暂停",done:"已完成",failed:"失败"};
+    const status = key => `<span class="status ${key}">${statusText[key]}</span>`;
+    const rows = [
+      {name:"openai-paper-collection.zip", meta:"等待当前任务释放连接", status:"queued", pct:0, size:"128 MB"},
+      {name:"rustup-init.exe", meta:"分段状态已保存", status:"paused", pct:51, size:"9.2 MB"},
+      {name:"ubuntu-26.04-desktop-amd64.iso", meta:"今天 09:42 完成", status:"done", pct:100, size:"3.5 GB"},
+      {name:"archive-dataset.tar.zst", meta:"服务器返回 403", status:"failed", pct:9, size:"940 MB"}
+    ];
+    const directions = {
+      blueprint: {
+        letter:"A",
+        name:"制图 · Draftline",
+        short:"精确的传输标尺，白纸与石墨层级",
+        thesis:"把每一段下载画成可核对的度量，而不是一张泛化的仪表盘。",
+        light:["#ffffff","#111417","#1e5fd3"],
+        dark:["#0b1119","#f2f5f7","#7ca5ff"],
+        tags:["blueprint","light/dark","operate"]
+      },
+      transit: {
+        letter:"B",
+        name:"时刻 · Transit",
+        short:"把当前传输和后续任务排成一条清楚的线路",
+        thesis:"下载是一段有起点、当前站和终点的行程。",
+        light:["#ffffff","#171a18","#0d6b51"],
+        dark:["#101311","#f0f3ee","#80d1b1"],
+        tags:["transit","light/dark","route"]
+      },
+      folio: {
+        letter:"C",
+        name:"档案 · Folio",
+        short:"让文件名、保存位置与完成结果成为主体",
+        thesis:"下载最终是一件被保存、可再次找到的文件。",
+        light:["#ffffff","#1d1b18","#2a56a2"],
+        dark:["#141311","#f3f0ea","#9db9ed"],
+        tags:["archive","light/dark","document"]
+      }
+    };
+    const state = {dir:"blueprint", screen:"main", theme:"light"};
+
+    function winControls() {
+      return `<div class="win-controls" aria-hidden="true">
+        <span class="win-control"><svg viewBox="0 0 12 12"><path d="M2 6h8" stroke="currentColor"/></svg></span>
+        <span class="win-control"><svg viewBox="0 0 12 12"><rect x="2" y="2" width="8" height="8" fill="none" stroke="currentColor"/></svg></span>
+        <span class="win-control close"><svg viewBox="0 0 12 12"><path d="m2 2 8 8m0-8-8 8" stroke="currentColor"/></svg></span>
+      </div>`;
+    }
+    function titlebar(label) {
+      return `<div class="titlebar"><div class="title-name"><span class="mini-mark">V</span><span>${label}</span></div>${winControls()}</div>`;
+    }
+    function fileCell(name, meta) {
+      return `<div class="file"><span class="file-icon">${icon("file",21,1.4)}</span><div class="file-copy"><div class="file-name">${name}</div><div class="file-sub">${meta}</div></div></div>`;
+    }
+    function stepper(value) {
+      return `<div class="stepper"><button aria-label="减少">−</button><output class="mono">${value}</output><button aria-label="增加">+</button></div>`;
+    }
+    function settingRow(title, desc, control) {
+      return `<div class="setting-row"><div class="setting-label"><strong>${title}</strong><span>${desc}</span></div>${control}</div>`;
+    }
+    function appShell(inner, extraClass="") {
+      return `<div class="prototype ${state.dir}" data-dir="${state.dir}" data-theme="${state.theme}"><div class="app-window ${extraClass}">${inner}</div></div>`;
+    }
+
+    function blueprintMain() {
+      return appShell(`
+        ${titlebar("Volant · 传输制图")}
+        <header class="toolbar">
+          <div class="brand"><span class="brand-mark">V</span>Volant</div>
+          <nav class="tabs"><button class="tab active">全部 5</button><button class="tab">进行中 2</button><button class="tab">已完成 1</button><button class="tab">失败 1</button></nav>
+          <div class="toolbar-end"><span class="pulse"><b class="mono">18.7 MB/s</b> · 8 连接</span><button class="btn primary">${icon("plus",13,2)}新建下载</button></div>
+        </header>
+        <div class="body">
+          <main class="draft-main">
+            <div class="draft-head"><div><h1>传输</h1><p class="sub">当前任务与后续队列保持在同一张工作纸上。</p></div><div class="pulse">保存至 <b>Downloads</b></div></div>
+            <section class="active-sheet">
+              <div class="sheet-title"><div><h2>debian-13.2.0-amd64-netinst.iso</h2><p>cdimage.debian.org · HTTP 分段下载 · 支持 Range</p></div><div class="pct">61%</div></div>
+              <div class="ruler" aria-label="下载进度 61%"><span></span></div>
+              <div class="metrics">
+                <div class="metric"><span>已下载</span><b class="mono">421 / 682 MB</b></div>
+                <div class="metric"><span>当前速度</span><b class="mono">18.7 MB/s</b></div>
+                <div class="metric"><span>活动连接</span><b>8 / 8</b></div>
+                <div class="metric"><span>剩余</span><b>约 14 秒</b></div>
+              </div>
+              <div class="sheet-actions"><button class="btn secondary">${icon("pause",12)}暂停</button><button class="btn ghost">${icon("folder",12)}打开所在位置</button></div>
+            </section>
+            <div class="queue-head"><span>文件</span><span>进度</span><span>大小</span><span>状态</span></div>
+            ${rows.map(row => `<div class="queue-row">${fileCell(row.name,row.meta)}<div class="mini-progress"><div class="track"><i style="--p:${row.pct}%"></i></div><span class="mono">${row.pct}%</span></div><span class="size mono">${row.size}</span>${status(row.status)}</div>`).join("")}
+          </main>
+          <aside class="draft-rail">
+            <div class="rail-title"><span>连接分配</span>${icon("more",13)}</div>
+            <div class="rail-figure"><h3>当前连接速率</h3><div class="conn-bars">${[73,86,64,91,72,83,58,78].map((h,i)=>`<i style="--h:${h}%;--o:${i%3===0?.58:.88}"></i>`).join("")}</div></div>
+            <div class="rail-figure"><h3>文件目标</h3><div class="rail-kv"><span>总大小</span><b class="mono">682 MB</b></div><div class="rail-kv"><span>已写入</span><b class="mono">421 MB</b></div><div class="rail-kv"><span>可续传</span><b>是</b></div></div>
+            <div class="rail-note">失败或退出后，已写入的分段仍可继续。当前连接状态来自下载引擎实时事件。</div>
+            <div class="rail-actions"><button class="btn secondary">${icon("folder",12)}打开下载目录</button><button class="btn ghost">${icon("settings",12)}设置</button></div>
+          </aside>
+        </div>
+      `,"draftline");
+    }
+    function transitMain() {
+      return appShell(`
+        ${titlebar("Volant · 下载时刻")}
+        <header class="transit-top"><div class="brand"><span class="brand-mark">V</span>Volant</div><nav class="transit-nav"><button class="active">全部 5</button><button>进行中 2</button><button>已完成 1</button><button>失败 1</button></nav><div class="toolbar-end"><span class="pulse"><b class="mono">18.7 MB/s</b></span><button class="btn primary">${icon("plus",13,2)}新建下载</button></div></header>
+        <div class="transit-body">
+          <aside class="transit-rail"><div class="brand"><span class="brand-mark">V</span><span>队列</span></div><button class="rail-btn active">${icon("list",13)}全部<span class="count">5</span></button><button class="rail-btn">${icon("download",13)}进行中<span class="count">2</span></button><button class="rail-btn">${icon("check",13)}已完成<span class="count">1</span></button><button class="rail-btn">${icon("fail",13)}失败<span class="count">1</span></button><div class="rail-note">选择任务查看它的连接和保存位置。</div><div class="rail-actions"><button class="btn ghost">${icon("settings",13)}设置</button></div></aside>
+          <main class="transit-content">
+            <div class="transit-head"><div><h1>正在传输</h1><p class="sub">当前任务已经通过 61% 的区间。</p></div><span class="status active">8 条连接</span></div>
+            <section class="service-line">
+              <div class="service-main"><div class="service-kicker">当前任务</div><h2>debian-13.2.0-amd64-netinst.iso</h2><div class="service-source">cdimage.debian.org → C:\\Users\\Evan\\Downloads</div><div class="route" aria-label="传输路线 61%">${Array.from({length:8},(_,i)=>`<span class="stop ${i<5?"done":i===5?"live":""}"></span>`).join("")}</div></div>
+              <div class="service-side"><div class="kv"><span>进度</span><b class="mono">61%</b></div><div class="kv"><span>速度</span><b class="mono">18.7 MB/s</b></div><div class="kv"><span>剩余</span><b>约 14 秒</b></div><div class="kv"><span>大小</span><b class="mono">682 MB</b></div></div>
+            </section>
+            <div class="transit-actions sheet-actions"><button class="btn primary">${icon("pause",12)}暂停下载</button><button class="btn secondary">${icon("folder",12)}打开目录</button></div>
+            <div class="transit-list">${rows.map(row=>`<div class="transit-row">${fileCell(row.name,row.meta)}<div class="transit-progress"><div class="track"><i style="--p:${row.pct}%"></i></div><span class="mono">${row.pct}%</span></div><span class="size mono">${row.size}</span>${status(row.status)}</div>`).join("")}</div>
+            <div class="bottom-info"><span>今日接收 <b>7</b> 个文件</span><i class="bottom-dot"></i><span>保存目录剩余 <b>176 GB</b></span><i class="bottom-dot"></i><span>捕获已开启</span></div>
+          </main>
+        </div>
+      `);
+    }
+    function folioMain() {
+      return appShell(`
+        ${titlebar("Volant · 文件档案")}
+        <header class="folio-top"><div class="brand"><span class="brand-mark">V</span>Volant</div><nav class="folio-nav"><button class="active">全部 5</button><button>进行中 2</button><button>已完成 1</button><button>失败 1</button></nav><div class="toolbar-end"><button class="btn ghost">${icon("folder",13)}目录</button><button class="btn primary">${icon("plus",13,2)}新建下载</button></div></header>
+        <div class="folio-body">
+          <aside class="folio-index"><div class="folio-index-head"><h1>文件</h1><span class="folio-index-count">5 个任务</span></div>
+            <div class="folio-row active"><span class="file-icon">${icon("file",18,1.4)}</span><div><div class="file-name">debian-13.2.0-amd64-netinst.iso</div><div class="file-sub">下载中 · 18.7 MB/s</div></div><span class="folio-pct mono">61%</span></div>
+            ${rows.map(row=>`<div class="folio-row"><span class="file-icon">${icon("file",18,1.4)}</span><div><div class="file-name">${row.name}</div><div class="file-sub">${row.meta}</div></div><span class="folio-pct mono">${row.pct}%</span></div>`).join("")}
+          </aside>
+          <main class="folio-sheet">
+            <div class="sheet-num">文件 01 · 当前选中的下载</div>
+            <h2>debian-13.2.0-amd64-netinst.iso</h2>
+            <div class="source">来自 cdimage.debian.org · 下载完成后保存在 Downloads</div>
+            <div class="folio-progress"><div class="folio-progress-head"><strong>61%</strong><span class="mono">421 MB / 682 MB · 约 14 秒</span></div><div class="folio-bar"><span></span></div><div class="folio-metric-row"><div class="folio-metric"><span>速度</span><b class="mono">18.7 MB/s</b></div><div class="folio-metric"><span>连接</span><b>8 / 8</b></div><div class="folio-metric"><span>状态</span><b>下载中</b></div><div class="folio-metric"><span>续传</span><b>可用</b></div></div></div>
+            <div class="folio-actions"><button class="btn primary">${icon("pause",12)}暂停下载</button><button class="btn secondary">${icon("folder",12)}打开所在位置</button></div>
+            <div class="folio-info"><div><h3>保存位置</h3><div class="folio-path mono">C:\\Users\\Evan\\Downloads\\debian-13.2.0-amd64-netinst.iso</div></div><div><h3>接下来</h3><p>openai-paper-collection.zip 正在等待。</p></div></div>
+            <div class="folio-foot"><span>退出后可从 421 MB 继续</span><span>下载目录剩余 176 GB</span></div>
+          </main>
+        </div>
+      `);
+    }
+
+    function settingsBlueprint() {
+      return appShell(`
+        ${titlebar("Volant · 设置")}
+        <div class="settings-body">
+          <aside class="settings-nav"><div class="settings-nav-title">偏好设置</div><button class="rail-btn active">${icon("download",13)}下载</button><button class="rail-btn">${icon("network",13)}连接</button><button class="rail-btn">${icon("link",13)}捕获</button><button class="rail-btn">${icon("monitor",13)}外观</button></aside>
+          <main class="settings-main"><h1>下载</h1><p class="sub">这些值适用于后续任务，当前下载保持现有连接。</p>
+            <section class="setting-group"><h2>队列</h2>${settingRow("同时下载","超过上限的任务进入等待。",stepper(3))}${settingRow("每个任务连接","站点限流时自动回退。",stepper(8))}</section>
+            <section class="setting-group"><h2>保存</h2>${settingRow("下载目录","不可写时保留输入并说明原因。",`<div class="path"><input class="mono" value="C:\\Users\\Evan\\Downloads"><button>${icon("folder",12)}</button></div>`)}${settingRow("下载限速","只限制 Volant 的传输速率。",`<select class="select"><option>不限</option><option>10 MB/s</option></select>`)}</section>
+            <section class="setting-group"><h2>系统</h2>${settingRow("监视剪贴板","识别到链接时打开新建下载。",`<button class="switch on" aria-label="监视剪贴板"></button>`)}${settingRow("主题","系统、浅色与深色使用同一组语义。",`<div class="seg"><button class="active">系统</button><button>浅色</button><button>深色</button></div>`)}</section>
+          </main>
+        </div><footer class="settings-footer"><span>更改已自动保存</span><button>打开配置目录</button></footer>
+      `,"settings-blueprint float");
+    }
+    function settingsTransit() {
+      return appShell(`
+        ${titlebar("Volant · 设置")}
+        <div class="settings-body transit-settings-layout">
+          <main class="settings-main"><h1>下载队列</h1><p class="sub">设置变化会同步给正在使用的引擎。</p>
+            <section class="setting-group"><h2>并发</h2>${settingRow("同时下载","同时运行的任务数量。",stepper(3))}${settingRow("每个任务连接数","每条任务可用的最大连接数。",stepper(8))}</section>
+            <section class="setting-group"><h2>速度</h2>${settingRow("全局限速","设为不限时使用全部可用带宽。",`<select class="select"><option>不限</option><option>10 MB/s</option></select>`)}${settingRow("完成后做种","仅对 BitTorrent 任务生效。",`<button class="switch" aria-label="完成后做种"></button>`)}</section>
+            <section class="setting-group"><h2>集成</h2>${settingRow("监视剪贴板","识别 HTTP、HTTPS 与 magnet。",`<button class="switch on" aria-label="监视剪贴板"></button>`)}${settingRow("删除前确认","避免误删未完成任务。",`<button class="switch on" aria-label="删除前确认"></button>`)}</section>
+            <section class="setting-group"><h2>保存</h2>${settingRow("下载目录","新任务默认保存位置。",`<div class="path"><input class="mono" value="C:\\Users\\Evan\\Downloads"><button>${icon("folder",12)}</button></div>`)}</section>
+          </main>
+          <aside class="transit-side-card"><h2>即时预览</h2><div class="transit-preview"><div class="transit-preview-title">debian-13.2.0-amd64-netinst.iso</div><div class="kv"><span>连接上限</span><b>8</b></div><div class="kv"><span>速度</span><b class="mono">18.7 MB/s</b></div><div class="route">${Array.from({length:5},(_,i)=>`<span class="stop ${i<3?"done":i===3?"live":""}"></span>`).join("")}</div></div><p class="rail-note">设置会立即应用。正在传输的任务不会中断。</p></aside>
+        </div><footer class="settings-footer"><span>更改已同步到引擎</span><button>查看配置文件</button></footer>
+      `,"settings-transit float");
+    }
+    function settingsFolio() {
+      return appShell(`
+        ${titlebar("Volant · 设置")}
+        <div class="settings-body folio-settings"><aside class="settings-nav"><div class="settings-nav-title">设置分类</div><button class="rail-btn active">${icon("download",13)}下载与保存</button><button class="rail-btn">${icon("network",13)}网络</button><button class="rail-btn">${icon("link",13)}捕获</button><button class="rail-btn">${icon("monitor",13)}外观</button></aside>
+          <main class="settings-main"><h1>下载与保存</h1><p class="sub">用尽量少的选项维持可靠、可恢复的下载。</p>
+            <section class="setting-group"><h2>队列</h2>${settingRow("同时下载","达到上限后保留在队列。",stepper(3))}${settingRow("每个任务连接","上限 32，按站点自动降低。",stepper(8))}</section>
+            <section class="setting-group"><h2>文件</h2>${settingRow("下载目录","路径不可写时不会静默跳过。",`<div class="path"><input class="mono" value="C:\\Users\\Evan\\Downloads"><button>${icon("folder",12)}</button></div>`)}${settingRow("下载限速","为视频通话保留带宽。",`<select class="select"><option>不限</option><option>10 MB/s</option></select>`)}</section>
+            <section class="setting-group"><h2>自动化</h2>${settingRow("监视剪贴板","发现链接时打开新建下载。",`<button class="switch on" aria-label="监视剪贴板"></button>`)}${settingRow("删除前确认","保留下载记录的恢复机会。",`<button class="switch on" aria-label="删除前确认"></button>`)}</section>
+            <section class="setting-group"><h2>外观</h2>${settingRow("主题","浅色以白色为主，深色沿用同一语义。",`<div class="seg"><button class="active">系统</button><button>浅色</button><button>深色</button></div>`)}</section>
+          </main>
+        </div><footer class="settings-footer"><span>所有更改自动保存</span><button>恢复默认设置</button></footer>
+      `,"settings-folio float");
+    }
+
+    function addBlueprint() {
+      return appShell(`
+        ${titlebar("Volant · 新建下载")}
+        <main class="add-body"><h1>接收一个文件</h1><p class="sub">先核对文件边界，再加入传输队列。</p>
+          <label class="url-shell focused">${icon("link",14)}<input aria-label="下载链接" value="https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/debian-13.2.0-amd64-netinst.iso"></label><p class="url-note">支持 HTTP、HTTPS、magnet 与拖入 .torrent 文件</p>
+          <section class="probe"><div class="probe-head"><span>文件回执</span>${status("active")}</div><div class="probe-file">${fileCell("debian-13.2.0-amd64-netinst.iso","cdimage.debian.org · 已读取")}</div><div class="probe-meta"><div><span>文件大小</span><b class="mono">682 MB</b></div><div><span>连接建议</span><b>8 条 · 自适应</b></div><div><span>断点续传</span><b>可用</b></div></div><div class="destination">${icon("folder",13)}<span class="mono">C:\\Users\\Evan\\Downloads</span><button>更改</button></div></section>
+          <footer class="add-footer"><span>按 Enter 开始下载</span><div class="add-actions"><button class="btn secondary">取消</button><button class="btn primary">开始下载</button></div></footer>
+        </main>
+      `,"add-blueprint float");
+    }
+    function addTransit() {
+      return appShell(`
+        ${titlebar("Volant · 新建下载")}
+        <main class="add-body"><h1>安排一次下载</h1><p class="sub">确认来源和目的地后立即进入队列。</p>
+          <div class="transit-add-tabs"><button class="active">链接</button><button>种子文件</button><button>Magnet</button></div>
+          <div class="transit-add-grid"><div><label class="url-shell focused">${icon("link",14)}<input aria-label="下载链接" value="https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/debian-13.2.0-amd64-netinst.iso"></label><p class="url-note">Volant 会复用当前连接读取文件信息。</p><section class="probe"><div class="probe-head"><span>已确认文件</span><span>34 ms</span></div><div class="probe-file">${fileCell("debian-13.2.0-amd64-netinst.iso","cdimage.debian.org")}</div><div class="probe-meta"><div><span>大小</span><b class="mono">682 MB</b></div><div><span>预计速度</span><b class="mono">18.7 MB/s</b></div><div><span>续传</span><b>可用</b></div></div></section></div><aside class="add-side-box"><h2>目标位置</h2><div class="path-copy mono">C:\\Users\\Evan\\Downloads</div><div class="kv"><span>剩余空间</span><b>176 GB</b></div><div class="kv"><span>文件大小</span><b class="mono">682 MB</b></div><div class="route">${Array.from({length:5},(_,i)=>`<span class="stop ${i===0?"done":""}"></span>`).join("")}</div></aside></div>
+          <footer class="add-footer"><span>状态：等待确认</span><div class="add-actions"><button class="btn secondary">取消</button><button class="btn primary">开始下载</button></div></footer>
+        </main>
+      `,"add-transit float");
+    }
+    function addFolio() {
+      return appShell(`
+        ${titlebar("Volant · 新建下载")}
+        <main class="add-body folio-add"><h1>把文件带回来</h1><p class="sub">输入来源，确认文件名和保存位置。</p>
+          <div class="add-layout"><div><label class="url-shell focused">${icon("link",14)}<input aria-label="下载链接" value="https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/debian-13.2.0-amd64-netinst.iso"></label><p class="url-note">支持 HTTP、HTTPS、magnet 与 .torrent</p><section class="probe"><div class="probe-head"><span>即将接收</span>${status("active")}</div><div class="probe-file">${fileCell("debian-13.2.0-amd64-netinst.iso","cdimage.debian.org · 682 MB")}</div><div class="probe-meta"><div><span>预计用时</span><b>约 37 秒</b></div><div><span>连接</span><b>8 条</b></div><div><span>续传</span><b>可用</b></div></div></section></div><aside class="destination-panel"><h2>保存位置</h2><div class="path-copy mono">C:\\Users\\Evan\\Downloads</div><div class="space">此卷剩余 176 GB</div><div class="row"><span>保存后打开文件夹</span><button class="switch" aria-label="保存后打开文件夹"></button></div><div class="row"><span>监视剪贴板</span><button class="switch on" aria-label="监视剪贴板"></button></div></aside></div>
+          <footer class="add-footer"><span>来源已读取 · 可继续</span><div class="add-actions"><button class="btn secondary">取消</button><button class="btn primary">下载到此位置</button></div></footer>
+        </main>
+      `,"add-folio float");
+    }
+
+    function renderDirectionTabs() {
+      document.getElementById("direction-row").innerHTML = Object.entries(directions).map(([key,d]) => `
+        <button class="direction-card ${key===state.dir?"active":""}" data-dir="${key}" aria-pressed="${key===state.dir}">
+          <span class="direction-index" style="color:${key==="folio"?"#fff":d.light[0]};background:${d.dark[0]}">${d.letter}</span>
+          <span class="direction-copy"><strong>${d.name}</strong><span>${d.short}</span></span>
+          <span class="pair"><i style="background:${d.light[0]};border:1px solid #c9cdd0"></i><i style="background:${d.light[1]}"></i><i style="background:${d.light[2]}"></i><i style="background:${d.dark[0]}"></i><i style="background:${d.dark[2]}"></i></span>
+        </button>`).join("");
+    }
+    function renderControls() {
+      document.getElementById("screen-tabs").innerHTML = [["main","主窗口"],["settings","设置"],["add","新建下载"]].map(([k,label])=>`<button class="screen-tab ${state.screen===k?"active":""}" data-screen="${k}" aria-pressed="${state.screen===k}">${label}</button>`).join("");
+      document.getElementById("theme-control").innerHTML = `<button class="theme-button ${state.theme==="light"?"active":""}" data-theme="light" aria-pressed="${state.theme==="light"}">${icon("sun",13)}<span>浅色</span></button><button class="theme-button ${state.theme==="dark"?"active":""}" data-theme="dark" aria-pressed="${state.theme==="dark"}">${icon("moon",13)}<span>暗色</span></button>`;
+    }
+    function renderStage() {
+      const fn = {
+        "blueprint:main": blueprintMain,
+        "blueprint:settings": settingsBlueprint,
+        "blueprint:add": addBlueprint,
+        "transit:main": transitMain,
+        "transit:settings": settingsTransit,
+        "transit:add": addTransit,
+        "folio:main": folioMain,
+        "folio:settings": settingsFolio,
+        "folio:add": addFolio
+      }[`${state.dir}:${state.screen}`];
+      document.getElementById("stage").innerHTML = fn();
+      bindPreviewControls();
+    }
+    function bindPreviewControls() {
+      document.querySelectorAll(".switch").forEach(button => button.addEventListener("click", () => button.classList.toggle("on")));
+      document.querySelectorAll(".seg").forEach(group => group.querySelectorAll("button").forEach(button => {
+        button.addEventListener("click", () => {
+          group.querySelectorAll("button").forEach(sibling => sibling.classList.remove("active"));
+          button.classList.add("active");
+        });
+      }));
+    }
+    function render() {
+      renderDirectionTabs();
+      renderControls();
+      renderStage();
+    }
+    document.addEventListener("click", event => {
+      const dir = event.target.closest("[data-dir]");
+      if (dir) { state.dir = dir.dataset.dir; render(); return; }
+      const screen = event.target.closest("[data-screen]");
+      if (screen) { state.screen = screen.dataset.screen; render(); return; }
+      const theme = event.target.closest("[data-theme]");
+      if (theme) { state.theme = theme.dataset.theme; render(); }
+    });
+    const params = new URLSearchParams(location.search);
+    if (directions[params.get("dir")]) state.dir = params.get("dir");
+    if (["main","settings","add"].includes(params.get("screen"))) state.screen = params.get("screen");
+    if (["light","dark"].includes(params.get("theme"))) state.theme = params.get("theme");
+    if (params.get("export") === "1") document.body.classList.add("export");
+    render();
+  </script>
+</body>
+</html>

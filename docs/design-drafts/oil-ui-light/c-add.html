@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>传输轨 · 新建下载</title>
+  <link rel="stylesheet" href="common.css">
+  <style>
+    body { background: #eeeeee; }
+    .app-window { width: 700px; height: 500px; }
+    .body { flex: 1; min-height: 0; display: flex; flex-direction: column; background: #ffffff; padding: 23px 28px 0; }
+    h1 { margin: 0; font-size: 27px; line-height: 1.18; font-weight: 620; letter-spacing: -.03em; }
+    .sub { margin: 6px 0 18px; color: #6e6a64; font-size: 11.5px; }
+    .tabs { height: 34px; display: flex; gap: 22px; border-bottom: 1px solid #dedbd5; }
+    .tabs button { height: 34px; border: 0; border-bottom: 2px solid transparent; padding: 0; color: #716d67; background: transparent; font-size: 11px; }
+    .tabs button.active { border-color: #171717; color: #171717; font-weight: 600; }
+    .input-row { margin-top: 14px; height: 43px; display: flex; border: 1px solid #1a1a19; }
+    .input-row input { flex: 1; min-width: 0; border: 0; padding: 0 12px; color: #202020; background: #ffffff; outline: 0; font-size: 11px; }
+    .input-row button { width: 96px; border: 0; color: #ffffff; background: #171717; font-size: 11px; font-weight: 600; }
+    .hint { margin: 7px 0 16px; color: #78746e; font-size: 10px; }
+    .result { display: grid; grid-template-columns: 1fr 238px; border-top: 1px solid #171717; border-bottom: 1px solid #e4e1dc; min-height: 176px; }
+    .receipt { padding: 16px 22px 15px 0; }
+    .receipt-head { display: flex; justify-content: space-between; align-items: center; color: #77736d; font-size: 9.5px; }
+    .file { display: flex; align-items: center; gap: 10px; margin-top: 11px; }
+    .file-icon { width: 28px; height: 32px; display: grid; place-items: center; color: #4a4742; }
+    .file-name { font-size: 13px; font-weight: 580; }
+    .origin { margin-top: 4px; color: #77736d; font-size: 9.5px; }
+    .meta { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 18px; margin-top: 14px; }
+    .meta span { display: block; color: #6f6b65; font-size: 9px; }
+    .meta b { display: block; margin-top: 3px; color: #232221; font-size: 10px; font-weight: 550; }
+    .destination { padding: 16px 0 15px 18px; border-left: 1px solid #e4e1dc; display: flex; flex-direction: column; }
+    .destination h2 { margin: 0 0 9px; color: #77736d; font-size: 9.5px; font-weight: 620; }
+    .path { color: #2a2928; font-size: 10px; line-height: 1.55; overflow-wrap: anywhere; }
+    .space { margin-top: 7px; color: #77736d; font-size: 9px; }
+    .lane-preview { margin-top: 16px; display: grid; gap: 4px; }
+    .lane { height: 2px; background: #e6e3de; }
+    .lane span { display: block; width: var(--w); height: 100%; background: #171717; }
+    .footer { margin-top: auto; height: 54px; display: flex; align-items: center; justify-content: space-between; border-top: 1px solid #e1ded9; }
+    .footer span { color: #77736d; font-size: 10px; }
+    .actions { display: flex; gap: 7px; }
+  </style>
+</head>
+<body>
+  <div class="desktop">
+    <div class="app-window window">
+      <div class="titlebar"><div class="titlebar-label"><span class="v-mark">V</span><span>Volant · 新建任务</span></div><div class="win-actions" aria-hidden="true"><span class="win-action"><svg viewBox="0 0 12 12"><path d="M2 6h8" stroke="currentColor"/></svg></span><span class="win-action"><svg viewBox="0 0 12 12"><rect x="2" y="2" width="8" height="8" fill="none" stroke="currentColor"/></svg></span><span class="win-action close"><svg viewBox="0 0 12 12"><path d="m2 2 8 8m0-8-8 8" stroke="currentColor"/></svg></span></div></div>
+      <main class="body">
+        <h1>加入传输轨</h1>
+        <p class="sub">先识别来源与文件边界，再加入现有队列。</p>
+        <div class="tabs"><button class="active">链接</button><button>种子文件</button><button>Magnet</button></div>
+        <label class="input-row"><input aria-label="下载链接" value="https://cdimage.debian.org/debian-cd/current/amd64/iso-cd/debian-13.2.0-amd64-netinst.iso"><button>读取文件</button></label>
+        <p class="hint">支持 HTTP、HTTPS、magnet，也可以拖入 .torrent 文件</p>
+        <section class="result">
+          <div class="receipt">
+            <div class="receipt-head"><span>传输预览</span><span class="status active">可下载</span></div>
+            <div class="file">
+              <span class="file-icon"><svg width="24" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M7 2h7l4 4v16H7z"/><path d="M14 2v5h5"/></svg></span>
+              <div><div class="file-name">debian-13.2.0-amd64-netinst.iso</div><div class="origin">cdimage.debian.org</div></div>
+            </div>
+            <div class="meta">
+              <div><span>大小</span><b class="mono">682 MB</b></div><div><span>连接建议</span><b>8 条 · 自适应</b></div>
+              <div><span>续传</span><b>支持 Range</b></div><div><span>探测耗时</span><b class="mono">34 ms</b></div>
+            </div>
+          </div>
+          <aside class="destination">
+            <h2>保存位置</h2>
+            <div class="path mono">C:\Users\Evan\Downloads</div>
+            <div class="space">此卷剩余 176 GB</div>
+            <div class="lane-preview" aria-label="预计连接轨道">
+              <div class="lane"><span style="--w:86%"></span></div><div class="lane"><span style="--w:64%"></span></div>
+              <div class="lane"><span style="--w:78%"></span></div><div class="lane"><span style="--w:92%"></span></div>
+              <div class="lane"><span style="--w:59%"></span></div><div class="lane"><span style="--w:81%"></span></div>
+            </div>
+          </aside>
+        </section>
+        <footer class="footer"><span>加入后立即成为当前任务</span><div class="actions"><button class="secondary-button">取消</button><button class="primary-button">加入队列</button></div></footer>
+      </main>
+    </div>
+  </div>
+</body>
+</html>

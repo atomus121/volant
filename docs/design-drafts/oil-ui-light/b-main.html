@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>白工位 · White Desk</title>
+  <link rel="stylesheet" href="common.css">
+  <style>
+    body { background: #ffffff; color: #111213; }
+    .app-window { background: #ffffff; }
+    .topbar {
+      height: 62px;
+      flex: 0 0 62px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      padding: 0 22px 0 18px;
+      border-bottom: 1px solid #e1e3e4;
+      background: #ffffff;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; min-width: 180px; }
+    .brand .v-mark { width: 26px; height: 26px; border-radius: 7px; font-size: 12px; }
+    .brand strong { font-size: 14px; font-weight: 650; letter-spacing: .01em; }
+    .nav { align-self: stretch; display: flex; align-items: center; gap: 24px; }
+    .nav button {
+      align-self: stretch;
+      border: 0;
+      border-bottom: 2px solid transparent;
+      padding: 0;
+      color: #62686d;
+      background: transparent;
+      font-size: 13px;
+    }
+    .nav button.active { color: #111213; border-color: #111213; font-weight: 600; }
+    .top-right { display: flex; align-items: center; gap: 15px; }
+    .global-speed { color: #62686d; font-size: 12px; }
+    .global-speed b { color: #111213; font-size: 13px; }
+    .workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: 58px minmax(0, 1fr) 300px; }
+    .tool-rail {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 7px;
+      padding: 13px 0;
+      background: #111213;
+      color: #ffffff;
+    }
+    .rail-logo { width: 30px; height: 30px; display: grid; place-items: center; margin-bottom: 10px; border-radius: 8px; color: #111213; background: #ffffff; font-size: 12px; font-weight: 800; }
+    .tool {
+      width: 36px;
+      height: 36px;
+      display: grid;
+      place-items: center;
+      border: 0;
+      border-radius: 7px;
+      color: #aeb1b1;
+      background: transparent;
+    }
+    .tool.active { color: #ffffff; background: #333536; }
+    .tool.bottom { margin-top: auto; }
+    .table-zone { min-width: 0; display: flex; flex-direction: column; background: #ffffff; }
+    .table-head { padding: 27px 26px 16px; display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; }
+    h1 { margin: 0; font-size: 25px; line-height: 1.15; font-weight: 630; letter-spacing: -.02em; }
+    .table-head p { margin: 6px 0 0; color: #656b6f; font-size: 12px; }
+    .head-metrics { display: flex; gap: 16px; align-items: center; color: #686d71; font-size: 11.5px; }
+    .head-metrics b { color: #17191a; font-size: 13px; font-weight: 550; }
+    .list-header,
+    .transfer {
+      display: grid;
+      grid-template-columns: minmax(300px, 1fr) 150px 76px 76px;
+      align-items: center;
+      gap: 15px;
+      padding: 0 26px;
+    }
+    .list-header {
+      height: 32px;
+      border-top: 1px solid #e3e5e6;
+      border-bottom: 1px solid #e3e5e6;
+      color: #696e72;
+      background: #fafbfb;
+      font-size: 10.5px;
+    }
+    .transfer {
+      min-height: 65px;
+      border-bottom: 1px solid #e8e9ea;
+    }
+    .transfer.selected { background: #f4f6f6; box-shadow: inset 2px 0 #111213; }
+    .file-cell { min-width: 0; display: flex; align-items: center; gap: 11px; }
+    .file-icon {
+      width: 28px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      color: #5b6165;
+    }
+    .file-name {
+      overflow: hidden;
+      color: #111213;
+      font-size: 13px;
+      font-weight: 580;
+      line-height: 1.35;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .file-sub { margin-top: 4px; color: #676d71; font-size: 10.5px; }
+    .progress-cell { display: grid; gap: 6px; }
+    .progress-top { display: flex; justify-content: space-between; color: #646a6e; font-size: 10px; }
+    .progress-track { height: 3px; background: #dfe2e3; overflow: hidden; border-radius: 20px; }
+    .progress-track i { display: block; width: var(--p); height: 100%; background: #151718; }
+    .lanes {
+      display: grid;
+      grid-template-columns: repeat(8, 1fr);
+      gap: 2px;
+      margin-top: 2px;
+    }
+    .lanes i { height: 3px; background: #e1e4e5; border-radius: 2px; overflow: hidden; }
+    .lanes i::after { content: ""; display: block; width: var(--w); height: 100%; background: #151718; opacity: .8; }
+    .size { color: #63696d; font-size: 11px; }
+    .transfer .status { justify-self: start; }
+    .inspector {
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      padding: 22px 20px;
+      border-left: 1px solid #dfe2e3;
+      background: #ffffff;
+    }
+    .inspector-head { display: flex; align-items: center; justify-content: space-between; color: #6c7276; font-size: 10.5px; }
+    .inspector-file { margin-top: 20px; }
+    .inspector-file h2 {
+      margin: 0;
+      color: #111213;
+      font-size: 17px;
+      line-height: 1.35;
+      font-weight: 610;
+      letter-spacing: -.015em;
+    }
+    .inspector-file p { margin: 7px 0 0; color: #656b6f; font-size: 10.5px; line-height: 1.5; }
+    .connector {
+      margin-top: 20px;
+      padding: 14px 13px 13px;
+      border: 1px solid #dde0e1;
+      border-radius: 8px;
+      background: #ffffff;
+    }
+    .connector-title { display: flex; justify-content: space-between; align-items: center; color: #62686c; font-size: 10px; }
+    .connector-title b { color: #151718; font-weight: 600; }
+    .bars {
+      height: 42px;
+      display: flex;
+      align-items: flex-end;
+      gap: 5px;
+      margin-top: 12px;
+    }
+    .bars i { flex: 1; height: var(--h); background: #1a1b1c; border-radius: 2px 2px 0 0; opacity: var(--o); }
+    .detail-section { margin-top: 19px; padding-top: 14px; border-top: 1px solid #e5e7e8; }
+    .detail-section h3 { margin: 0 0 8px; color: #6c7276; font-size: 10px; font-weight: 600; }
+    .kv { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 5px 0; color: #6e7377; font-size: 11px; }
+    .kv b { color: #1c1e1f; font-weight: 540; }
+    .path { overflow: hidden; color: #4f5458; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+    .inspector-actions { margin-top: auto; display: grid; gap: 7px; }
+    .inspector-actions .primary-button { background: #111213; }
+  </style>
+</head>
+<body>
+  <div class="desktop">
+    <div class="app-window">
+      <div class="titlebar">
+        <div class="titlebar-label"><span class="v-mark">V</span><span>Volant · 下载工作台</span></div>
+        <div class="win-actions" aria-hidden="true">
+          <span class="win-action"><svg viewBox="0 0 12 12"><path d="M2 6h8" stroke="currentColor"/></svg></span>
+          <span class="win-action"><svg viewBox="0 0 12 12"><rect x="2" y="2" width="8" height="8" fill="none" stroke="currentColor"/></svg></span>
+          <span class="win-action close"><svg viewBox="0 0 12 12"><path d="m2 2 8 8m0-8-8 8" stroke="currentColor"/></svg></span>
+        </div>
+      </div>
+      <header class="topbar">
+        <div class="brand"><span class="v-mark">V</span><strong>Volant</strong></div>
+        <nav class="nav" aria-label="任务筛选">
+          <button class="active">全部 5</button>
+          <button>进行中 2</button>
+          <button>已完成 1</button>
+          <button>失败 1</button>
+        </nav>
+        <div class="top-right">
+          <span class="global-speed"><b class="mono">18.7 MB/s</b> · 8 连接</span>
+          <button class="primary-button">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+            新建下载
+          </button>
+        </div>
+      </header>
+      <div class="workspace">
+        <aside class="tool-rail" aria-label="主导航">
+          <span class="rail-logo">V</span>
+          <button class="tool active" aria-label="全部下载">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+          </button>
+          <button class="tool" aria-label="进行中">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14"/></svg>
+          </button>
+          <button class="tool" aria-label="已完成">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="m5 12 4 4L19 6"/></svg>
+          </button>
+          <button class="tool" aria-label="失败任务">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="9"/><path d="m9 9 6 6m0-6-6 6"/></svg>
+          </button>
+          <button class="tool bottom" aria-label="设置">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.4 1A7 7 0 0 0 15 6.2L14.7 3h-5.4L9 6.2a7 7 0 0 0-1.5 1L5.1 6.1l-2 3.4 2 1.5a7 7 0 0 0 0 2l-2 1.5 2 3.4 2.4-1a7 7 0 0 0 1.5 1l.3 3.2h5.4l.3-3.2a7 7 0 0 0 1.5-1l2.4 1 2-3.4-2-1.5c.1-.3.1-.7.1-1Z"/></svg>
+          </button>
+        </aside>
+
+        <main class="table-zone">
+          <div class="table-head">
+            <div><h1>全部下载</h1><p>按加入顺序排列 · 配置目录可迁移</p></div>
+            <div class="head-metrics"><span>速度 <b class="mono">18.7 MB/s</b></span><span>活动 <b>8</b></span><span>剩余 <b>约 14 秒</b></span></div>
+          </div>
+          <div class="list-header"><span>文件</span><span>进度</span><span>大小</span><span>状态</span></div>
+          <article class="transfer selected">
+            <div class="file-cell">
+              <span class="file-icon"><svg width="21" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M7 2h7l4 4v16H7z"/><path d="M14 2v5h5M9 12h6M9 16h4"/></svg></span>
+              <div style="min-width:0"><div class="file-name">debian-13.2.0-amd64-netinst.iso</div><div class="file-sub">cdimage.debian.org · 421 MB / 682 MB</div></div>
+            </div>
+            <div class="progress-cell">
+              <div class="progress-top"><span class="mono">18.7 MB/s</span><span class="mono">61%</span></div>
+              <div class="progress-track"><i style="--p:61%"></i></div>
+              <div class="lanes" aria-label="八条连接">
+                <i style="--w:88%"></i><i style="--w:63%"></i><i style="--w:77%"></i><i style="--w:94%"></i>
+                <i style="--w:58%"></i><i style="--w:81%"></i><i style="--w:67%"></i><i style="--w:73%"></i>
+              </div>
+            </div>
+            <span class="size mono">682 MB</span>
+            <span class="status active">下载中</span>
+          </article>
+          <article class="transfer">
+            <div class="file-cell"><span class="file-icon"><svg width="21" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M7 2h7l4 4v16H7z"/><path d="M14 2v5h5"/></svg></span><div><div class="file-name">openai-paper-collection.zip</div><div class="file-sub">等待可用连接</div></div></div>
+            <div class="progress-cell"><div class="progress-top"><span>—</span><span class="mono">0%</span></div><div class="progress-track"><i style="--p:0%"></i></div></div>
+            <span class="size mono">128 MB</span><span class="status queued">等待</span>
+          </article>
+          <article class="transfer">
+            <div class="file-cell"><span class="file-icon"><svg width="21" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M7 2h7l4 4v16H7z"/><path d="M14 2v5h5"/></svg></span><div><div class="file-name">rustup-init.exe</div><div class="file-sub">分段状态已保存</div></div></div>
+            <div class="progress-cell"><div class="progress-top"><span>已暂停</span><span class="mono">51%</span></div><div class="progress-track"><i style="--p:51%"></i></div></div>
+            <span class="size mono">9.2 MB</span><span class="status paused">已暂停</span>
+          </article>
+          <article class="transfer">
+            <div class="file-cell"><span class="file-icon"><svg width="21" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M7 2h7l4 4v16H7z"/><path d="M14 2v5h5"/></svg></span><div><div class="file-name">ubuntu-26.04-desktop-amd64.iso</div><div class="file-sub">今天 09:42 完成</div></div></div>
+            <div class="progress-cell"><div class="progress-top"><span>可打开</span><span class="mono">100%</span></div><div class="progress-track"><i style="--p:100%"></i></div></div>
+            <span class="size mono">3.5 GB</span><span class="status done">已完成</span>
+          </article>
+          <article class="transfer">
+            <div class="file-cell"><span class="file-icon"><svg width="21" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M7 2h7l4 4v16H7z"/><path d="M14 2v5h5"/></svg></span><div><div class="file-name">archive-dataset.tar.zst</div><div class="file-sub">服务器返回 403</div></div></div>
+            <div class="progress-cell"><div class="progress-top"><span>已停止</span><span class="mono">9%</span></div><div class="progress-track"><i style="--p:9%"></i></div></div>
+            <span class="size mono">940 MB</span><span class="status failed">失败</span>
+          </article>
+        </main>
+
+        <aside class="inspector">
+          <div class="inspector-head"><span>任务检查器</span><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></div>
+          <div class="inspector-file"><h2>debian-13.2.0-amd64-netinst.iso</h2><p>HTTP 分段下载 · 服务器支持 Range</p></div>
+          <div class="connector">
+            <div class="connector-title"><span>连接分布</span><b>8 / 8 活动</b></div>
+            <div class="bars" aria-label="八条连接吞吐">
+              <i style="--h:78%;--o:.62"></i><i style="--h:91%;--o:.9"></i><i style="--h:66%;--o:.74"></i><i style="--h:84%;--o:.86"></i>
+              <i style="--h:58%;--o:.56"></i><i style="--h:88%;--o:.82"></i><i style="--h:73%;--o:.7"></i><i style="--h:96%;--o:.95"></i>
+            </div>
+          </div>
+          <div class="detail-section">
+            <h3>传输</h3>
+            <div class="kv"><span>总大小</span><b class="mono">682 MB</b></div>
+            <div class="kv"><span>已下载</span><b class="mono">421 MB</b></div>
+            <div class="kv"><span>当前速度</span><b class="mono">18.7 MB/s</b></div>
+            <div class="kv"><span>预计剩余</span><b>约 14 秒</b></div>
+          </div>
+          <div class="detail-section">
+            <h3>保存位置</h3>
+            <div class="path mono">C:\Users\Evan\Downloads\debian-13.2.0-amd64-netinst.iso</div>
+            <div class="kv"><span>可断点续传</span><b>是</b></div>
+          </div>
+          <div class="inspector-actions">
+            <button class="primary-button">暂停下载</button>
+            <button class="secondary-button">打开所在位置</button>
+          </div>
+        </aside>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

@@ -1354,7 +1354,12 @@ impl VolantShell {
             }))
     }
 
-    fn transfer_row(&self, row: Row, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn transfer_row(
+        &self,
+        row: Row,
+        narrow: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let selected = self.selected == Some(row.id);
         let accent = status_color(row.status, theme);
@@ -1373,12 +1378,16 @@ impl VolantShell {
             _ => IconName::ArrowDown,
         };
         let id = row.id;
-        let note = row.note();
         let percent = fmt::percent(row.downloaded, row.size);
         let size = if row.size == 0 {
             "—".to_string()
         } else {
             fmt::bytes(row.size)
+        };
+        let note = if narrow {
+            format!("{} · {} · {}", row.note(), percent, size)
+        } else {
+            row.note()
         };
         let can_toggle = matches!(
             row.status,
@@ -1405,11 +1414,20 @@ impl VolantShell {
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.confirm_delete(id, window, cx);
             }));
+        let actions = div()
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .gap_1()
+            .when_some(action, |this, action| this.child(action))
+            .child(delete);
 
         div()
             .id(ElementId::Name(format!("transfer-row-{id}").into()))
             .flex()
             .items_center()
+            .w_full()
+            .min_w(px(0.0))
             .gap_3()
             .h(px(78.0))
             .px_4()
@@ -1451,42 +1469,51 @@ impl VolantShell {
                             .text_size(px(12.0))
                             .text_color(muted)
                             .child(note),
-                    ),
-            )
-            .child(
-                div()
-                    .w(px(118.0))
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        Progress::new(ElementId::Name(format!("progress-{id}").into()))
-                            .value(row.frac() * 100.0)
-                            .color(accent)
-                            .w_full(),
                     )
-                    .child(div().text_size(px(11.0)).text_color(muted).child(percent)),
+                    .when(narrow, |this| {
+                        this.child(
+                            Progress::new(ElementId::Name(format!("progress-{id}").into()))
+                                .value(row.frac() * 100.0)
+                                .color(accent)
+                                .w_full(),
+                        )
+                    }),
             )
-            .child(
-                div()
-                    .w(px(82.0))
-                    .text_size(px(12.0))
-                    .text_color(foreground)
-                    .child(size),
-            )
-            .child(
-                div()
-                    .min_w(px(72.0))
-                    .px_2()
-                    .py_1()
-                    .rounded(px(999.0))
-                    .bg(accent.opacity(0.12))
-                    .text_size(px(11.0))
-                    .text_color(accent)
-                    .child(row.status.label()),
-            )
-            .when_some(action, |this, action| this.child(action))
-            .child(delete)
+            .when(!narrow, |this| {
+                this.child(
+                    div()
+                        .w(px(118.0))
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            Progress::new(ElementId::Name(format!("progress-{id}").into()))
+                                .value(row.frac() * 100.0)
+                                .color(accent)
+                                .w_full(),
+                        )
+                        .child(div().text_size(px(11.0)).text_color(muted).child(percent)),
+                )
+                .child(
+                    div()
+                        .w(px(82.0))
+                        .text_size(px(12.0))
+                        .text_color(foreground)
+                        .child(size),
+                )
+                .child(
+                    div()
+                        .min_w(px(72.0))
+                        .px_2()
+                        .py_1()
+                        .rounded(px(999.0))
+                        .bg(accent.opacity(0.12))
+                        .text_size(px(11.0))
+                        .text_color(accent)
+                        .child(row.status.label()),
+                )
+            })
+            .child(actions)
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.selected = Some(id);
                 cx.notify();
@@ -1496,8 +1523,17 @@ impl VolantShell {
 
 impl Render for VolantShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let compact = window.viewport_size().width.as_f32() < 1000.0;
-        let sidebar_width = if compact { 190.0 } else { 224.0 };
+        // viewport_size is in device pixels; layout and breakpoints are logical.
+        let viewport_width = window.viewport_size().width.as_f32() / window.scale_factor().max(1.0);
+        let compact = viewport_width < 1320.0;
+        let narrow = viewport_width < 1080.0;
+        let sidebar_width = if viewport_width < 900.0 {
+            176.0
+        } else if compact {
+            208.0
+        } else {
+            224.0
+        };
         let background = cx.theme().background;
         let foreground = cx.theme().foreground;
         let sidebar = cx.theme().sidebar;
@@ -1514,7 +1550,7 @@ impl Render for VolantShell {
         let rows = self.visible_rows();
         let mut row_elements = Vec::new();
         for row in &rows {
-            row_elements.push(self.transfer_row(row.clone(), cx));
+            row_elements.push(self.transfer_row(row.clone(), narrow, cx));
         }
 
         let selected = self
@@ -1543,6 +1579,36 @@ impl Render for VolantShell {
             .text_color(foreground)
             .track_focus(&self.focus_handle)
             .key_context("Volant")
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                let key = event.keystroke.key.as_str();
+                let modifiers = event.keystroke.modifiers;
+                if modifiers.control && key == "n" {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    this.open_add_dialog(window, cx);
+                    return;
+                }
+                if modifiers.modified() {
+                    return;
+                }
+                match key {
+                    "space" => {
+                        if let Some(id) = this.selected {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                            this.toggle(id, cx);
+                        }
+                    }
+                    "delete" => {
+                        if let Some(id) = this.selected {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                            this.confirm_delete(id, window, cx);
+                        }
+                    }
+                    _ => {}
+                }
+            }))
             .on_drop::<ExternalPaths>(cx.listener(|this, paths, window, cx| {
                 this.handle_external_paths(paths, window, cx);
             }))
@@ -1625,6 +1691,7 @@ impl Render for VolantShell {
                         div()
                             .flex_1()
                             .min_w(px(0.0))
+                            .overflow_hidden()
                             .h_full()
                             .flex()
                             .flex_col()
@@ -1674,12 +1741,17 @@ impl Render for VolantShell {
                                         .bg(secondary)
                                         .text_size(px(12.0))
                                         .text_color(muted)
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
                                         .child(notice),
                                 )
                             })
                             .child(
                                 div()
                                     .flex()
+                                    .w_full()
+                                    .min_w(px(0.0))
                                     .gap_3()
                                     .child(summary_card(
                                         "当前速度",
@@ -1975,7 +2047,14 @@ pub fn run() {
     application().with_assets(assets::Assets).run(move |cx| {
         init(cx);
         Theme::change(ThemeMode::Dark, None, cx);
-        let (width, height) = crate::platform::startup_size();
+        let (mut width, mut height) = crate::platform::startup_size();
+        if let Some(display) = cx.primary_display() {
+            // GPUI's display geometry and open_window bounds use the same units,
+            // so clamp here instead of mixing Win32 metrics with scaled layout.
+            let available = display.visible_bounds().size;
+            width = width.min((available.width.as_f32() - 32.0).max(520.0));
+            height = height.min((available.height.as_f32() - 64.0).max(340.0));
+        }
         let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),

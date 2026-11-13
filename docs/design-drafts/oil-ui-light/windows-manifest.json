@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "lang": "zh",
+  "round": "浅色 01 · 辅助窗口",
+  "nativeViewport": "1440x900",
+  "candidates": [
+    {
+      "source": "a-settings.html",
+      "name": "A · 页边 / 设置",
+      "concept": "横向分组，让低频设置保持与文件目录相同的开放性。",
+      "palette": ["#ffffff", "#111111", "#6f6b65", "#e4e3df"],
+      "traits": ["横向分类", "无左侧导航", "自动保存", "开放分组"]
+    },
+    {
+      "source": "a-add.html",
+      "name": "A · 页边 / 新建下载",
+      "concept": "把探测结果做成一张文件回执，主操作只有一个。",
+      "palette": ["#ffffff", "#111111", "#6f6b65", "#dedcd7"],
+      "traits": ["单行输入", "文件回执", "大文件名", "单一主动作"]
+    },
+    {
+      "source": "b-settings.html",
+      "name": "B · 白工位 / 设置",
+      "concept": "沿用黑色窄轨和系统化设置行，保持桌面工具的效率。",
+      "palette": ["#ffffff", "#111213", "#5f6469", "#d5d8da"],
+      "traits": ["黑色窄轨", "分类联动", "系统控件", "即时同步"]
+    },
+    {
+      "source": "b-add.html",
+      "name": "B · 白工位 / 新建下载",
+      "concept": "输入、文件核对和保存位置同时可见，减少确认成本。",
+      "palette": ["#ffffff", "#111213", "#62686c", "#dfe2e3"],
+      "traits": ["左右分栏", "探测摘要", "目标位置", "键盘完成"]
+    },
+    {
+      "source": "c-settings.html",
+      "name": "C · 传输轨 / 设置",
+      "concept": "设置改变对应的任务状态，右侧即时预览而不增加保存步骤。",
+      "palette": ["#ffffff", "#171717", "#6f6b65", "#e5e2dc"],
+      "traits": ["文字分类", "横向控制带", "即时预览", "直角控件"]
+    },
+    {
+      "source": "c-add.html",
+      "name": "C · 传输轨 / 新建下载",
+      "concept": "把新任务直接放进传输轨，来源、边界和目标一次确认。",
+      "palette": ["#ffffff", "#171717", "#6f6b65", "#e4e1dc"],
+      "traits": ["来源切换", "边界预览", "连接列", "加入现有队列"]
+    }
+  ]
+}
