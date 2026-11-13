@@ -14,3 +14,9 @@ publish = false
 gpui-kit = "=0.9.1"
 tokio = { version = "1", features = ["sync"] }
 volant-app-core = { path = "../app-core" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
+] }

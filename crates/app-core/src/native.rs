@@ -213,6 +213,58 @@ fn start_app() -> io::Result<()> {
     Command::new(sibling("volant")).spawn().map(|_| ())
 }
 
+/// Open the native folder picker used by settings.
+#[cfg(windows)]
+pub fn pick_folder(title: &str) -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::System::Com::{
+        COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoTaskMemFree,
+    };
+    use windows_sys::Win32::UI::Shell::{
+        BIF_EDITBOX, BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW, SHBrowseForFolderW,
+        SHGetPathFromIDListW,
+    };
+
+    let title: Vec<u16> = std::ffi::OsStr::new(title)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut shown = [0u16; 260];
+    unsafe {
+        CoInitializeEx(
+            std::ptr::null(),
+            (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32,
+        );
+        let browse = BROWSEINFOW {
+            hwndOwner: std::ptr::null_mut(),
+            pidlRoot: std::ptr::null_mut(),
+            pszDisplayName: shown.as_mut_ptr(),
+            lpszTitle: title.as_ptr(),
+            ulFlags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_EDITBOX,
+            lpfn: None,
+            lParam: 0,
+            iImage: 0,
+        };
+        let pidl = SHBrowseForFolderW(&browse);
+        if pidl.is_null() {
+            return None;
+        }
+        let mut path = [0u16; 260];
+        let ok = SHGetPathFromIDListW(pidl, path.as_mut_ptr());
+        CoTaskMemFree(pidl as *const core::ffi::c_void);
+        if ok == 0 {
+            return None;
+        }
+        let len = path.iter().position(|&c| c == 0).unwrap_or(0);
+        (len > 0).then(|| PathBuf::from(String::from_utf16_lossy(&path[..len])))
+    }
+}
+
+#[cfg(not(windows))]
+pub fn pick_folder(_title: &str) -> Option<PathBuf> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

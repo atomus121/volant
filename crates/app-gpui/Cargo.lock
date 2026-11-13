@@ -8178,6 +8178,7 @@ dependencies = [
  "gpui-kit",
  "tokio",
  "volant-app-core",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

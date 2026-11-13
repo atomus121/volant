@@ -1,8 +1,9 @@
 # GPUI Migration
 
-Status: P3 implementation complete, pending torrent/browser end-to-end
-validation. HTTP add with metadata preview, settings, delete confirmation,
-clipboard/capture wiring and torrent file selection are present.
+Status: P4 platform pass complete. The app now has a GPUI Kit title bar,
+DPI-aware startup bounds, native folder picking, browser capture verification,
+and external torrent drop wiring. IME and full keyboard/accessibility parity
+still need validation.
 
 ## Decisions
 
@@ -39,7 +40,7 @@ UI wake-up through `notify::UiNotifier`; each GUI supplies its own adapter.
 | P1 | shell, theme, fonts, icons, static list | complete: GPUI Kit dark theme, filters, summary cards and transfer rows render |
 | P2 | live list and detail panel | complete for HTTP: add -> progress -> pause -> resume -> done and state persistence |
 | P3 | dialogs, settings, torrent picker, capture, clipboard | implemented; HTTP dialog/settings verified, torrent/capture validation pending |
-| P4 | DPI, CJK, IME, focus, accessibility, file drop, window chrome | keyboard and pointer parity |
+| P4 | DPI, CJK, IME, focus, accessibility, file drop, window chrome | partial: title bar, DPI, folder picker and capture verified; IME/a11y/drop validation remains |
 | P5 | tests, screenshots, metrics, packaging | budgets pass after dogfooding |
 
 ## Acceptance Budgets
