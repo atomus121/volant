@@ -65,13 +65,37 @@ pub(crate) fn with_headers(
     req
 }
 
-/// 默认的 HTTP 客户端。DNS 用系统解析；HTTP/2 不开（分段要 HTTP/1.1 的 Range 可控）。
+/// How subsequent HTTP requests select a proxy.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum HttpProxy {
+    Direct,
+    #[default]
+    System,
+    Manual(String),
+}
+
+/// Default HTTP client using the operating system proxy configuration.
 pub fn client() -> Result<Client, Error> {
-    Client::builder()
+    client_with_proxy(HttpProxy::System)
+}
+
+/// Create an HTTP client for subsequently started tasks. DNS uses the system
+/// resolver; HTTP/2 remains disabled so segmented Range requests stay
+/// predictable.
+pub fn client_with_proxy(proxy: HttpProxy) -> Result<Client, Error> {
+    let builder = Client::builder()
         .user_agent(concat!("Volant/", env!("CARGO_PKG_VERSION")))
-        .connect_timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|e| Error::Http(e.to_string()))
+        .connect_timeout(Duration::from_secs(15));
+    let builder = match proxy {
+        HttpProxy::Direct => builder.no_proxy(),
+        HttpProxy::System => builder,
+        HttpProxy::Manual(address) => {
+            let proxy = reqwest::Proxy::all(address.trim())
+                .map_err(|e| Error::Http(format!("代理地址无效：{e}")))?;
+            builder.proxy(proxy)
+        }
+    };
+    builder.build().map_err(|e| Error::Http(e.to_string()))
 }
 
 #[derive(Debug)]

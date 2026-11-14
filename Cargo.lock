@@ -6894,6 +6894,7 @@ name = "volant-app-core"
 version = "0.6.16"
 dependencies = [
  "librqbit",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",

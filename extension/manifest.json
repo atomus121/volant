@@ -10,7 +10,15 @@
       "strict_min_version": "109.0"
     }
   },
-  "permissions": ["downloads", "cookies", "storage", "nativeMessaging"],
+  "permissions": [
+    "downloads",
+    "cookies",
+    "storage",
+    "nativeMessaging",
+    "webRequest",
+    "tabs",
+    "contextMenus"
+  ],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js"
@@ -18,5 +26,13 @@
   "action": {
     "default_title": "Volant 下载捕获",
     "default_popup": "popup.html"
-  }
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["video.js"],
+      "all_frames": true,
+      "run_at": "document_idle"
+    }
+  ]
 }

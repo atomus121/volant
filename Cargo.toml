@@ -17,7 +17,7 @@ volant-labserver = { path = "crates/labserver" }
 volant-torrent = { path = "crates/torrent" }
 volant-app-core = { path = "crates/app-core" }
 
-tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "fs", "signal"] }
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "fs", "signal", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 percent-encoding = "2"

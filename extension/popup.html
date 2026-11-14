@@ -2,37 +2,68 @@
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
-    <style>
-      :root { color-scheme: dark; }
-      body {
-        margin: 0;
-        padding: 14px 16px;
-        width: 268px;
-        background: #17181c;
-        color: #e8e8ea;
-        font: 13px/1.5 "Segoe UI", system-ui, sans-serif;
-      }
-      h1 { margin: 0 0 2px; font-size: 14px; font-weight: 600; }
-      .sub { color: #8b8d94; font-size: 12px; margin-bottom: 12px; }
-      label {
-        display: flex; align-items: center; gap: 8px;
-        padding: 8px 10px; border-radius: 8px; background: #22242a;
-        cursor: pointer; user-select: none;
-      }
-      input { accent-color: #5b8cff; width: 15px; height: 15px; margin: 0; }
-      #state { margin-top: 10px; font-size: 12px; color: #8b8d94; }
-      .bad { color: #ff8f6b; }
-      code { background: #22242a; padding: 1px 4px; border-radius: 4px; }
-    </style>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Volant 下载捕获</title>
+    <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
-    <h1>Volant 下载捕获</h1>
-    <div class="sub">浏览器里点下载，交给 Volant 跑（带上登录身份）。</div>
-    <label>
-      <input id="on" type="checkbox" />
-      <span>拦截浏览器下载</span>
-    </label>
-    <div id="state">检查中…</div>
+    <main class="popup">
+      <header class="header">
+        <div class="brand">
+          <span class="mark" aria-hidden="true">V</span>
+          <div>
+            <h1>Volant</h1>
+            <p>浏览器下载捕获</p>
+          </div>
+        </div>
+        <span id="version" class="version"></span>
+      </header>
+
+      <section id="status" class="status" aria-live="polite">
+        <span class="dot" aria-hidden="true"></span>
+        <span class="status-copy">
+          <strong id="status-title">正在连接 Volant</strong>
+          <span id="status-detail">检查原生消息组件…</span>
+        </span>
+      </section>
+
+      <label class="capture-row">
+        <span>
+          <strong>捕获普通下载</strong>
+          <small>浏览器点击后交给 Volant</small>
+        </span>
+        <input id="capture" type="checkbox" role="switch" checked />
+      </label>
+
+      <section class="media">
+        <div class="section-head">
+          <div>
+            <h2>页面媒体</h2>
+            <p id="media-summary">正在检查当前页面…</p>
+          </div>
+          <button id="refresh" class="icon-button" type="button" aria-label="刷新页面媒体" title="刷新">
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M13 5.25V2.5m0 2.75H10.25M13 5.25A5.25 5.25 0 1 0 13.25 10"
+                fill="none" stroke="currentColor" stroke-width="1.4"
+                stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
+        </div>
+        <div id="media-empty" class="empty">
+          播放视频后，这里会出现 HLS、DASH 或直接媒体文件。
+        </div>
+        <ul id="media-list" aria-label="当前页面媒体"></ul>
+        <p id="media-feedback" class="feedback" aria-live="polite" hidden></p>
+      </section>
+
+      <footer class="footer">
+        <label class="subtitles">
+          <input id="subtitles" type="checkbox" />
+          保存字幕
+        </label>
+        <button id="open-app" class="secondary" type="button">打开 Volant</button>
+      </footer>
+    </main>
     <script src="popup.js"></script>
   </body>
 </html>

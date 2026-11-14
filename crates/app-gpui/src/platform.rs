@@ -12,8 +12,8 @@ pub fn startup_size() -> (f32, f32) {
         let width = unsafe { GetSystemMetrics(SM_CXSCREEN) } as f32 / scale;
         let height = unsafe { GetSystemMetrics(SM_CYSCREEN) } as f32 / scale;
         (
-            1180.0_f32.min((width - 32.0).max(520.0)),
-            760.0_f32.min((height - 64.0).max(340.0)),
+            1180.0_f32.min((width - 32.0).max(960.0)),
+            760.0_f32.min((height - 64.0).max(560.0)),
         )
     }
     #[cfg(not(windows))]

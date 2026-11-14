@@ -11,7 +11,9 @@
 // 两个 bin 各编一份：host 只用帧的读写，界面才用 `Listener`。
 #![allow(dead_code)]
 
+use std::fmt;
 use std::io::{self, Read, Write};
+use std::sync::{Arc, Mutex};
 
 use crate::notify::Notifier;
 
@@ -22,15 +24,93 @@ pub const PIPE: &str = r"\\.\pipe\volant-capture";
 pub const MAX_FRAME: usize = 1 << 20;
 
 /// 浏览器发来的一条捕获。
-#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[derive(Clone, Default, serde::Deserialize)]
 #[serde(default)]
 pub struct Capture {
+    /// `download`, `ping`, `rules`, `videoLookup`, `videoPick`, ...
+    #[serde(rename = "type")]
+    pub action: String,
+    /// One browser request's correlation id.
+    #[serde(default, rename = "req")]
+    pub request_id: u64,
     pub url: String,
     pub referer: String,
     pub cookie: String,
     pub user_agent: String,
+    /// The video's own page, which may differ from the tab that embedded it.
+    pub page: String,
+    /// A plain media URL or an HLS/DASH manifest.
+    pub src: String,
+    pub title: String,
+    pub mime: String,
+    pub token: String,
+    pub choice: usize,
+    pub subtitles: bool,
+    /// Domain-scoped browser cookies for yt-dlp's Netscape cookie jar.
+    pub cookies: Vec<BrowserCookie>,
     /// 浏览器里的 `Date.now()`，用来量「点下载 → 引擎开跑」的真实耗时。
     pub t: u64,
+    /// The reply writer for this request. It is attached after deserialization
+    /// and never comes from browser JSON.
+    #[serde(skip)]
+    pub reply: Option<CaptureReply>,
+}
+
+#[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct BrowserCookie {
+    pub name: String,
+    pub value: String,
+    pub domain: String,
+    pub path: String,
+    pub secure: bool,
+    #[serde(rename = "httpOnly")]
+    pub http_only: bool,
+    #[serde(rename = "expirationDate")]
+    pub expiration_date: Option<f64>,
+}
+
+#[derive(Clone)]
+pub struct CaptureReply {
+    request_id: u64,
+    output: Arc<Mutex<std::fs::File>>,
+}
+
+impl CaptureReply {
+    fn new(request_id: u64, output: std::fs::File) -> CaptureReply {
+        CaptureReply {
+            request_id,
+            output: Arc::new(Mutex::new(output)),
+        }
+    }
+
+    pub fn send(&self, value: &serde_json::Value) -> io::Result<()> {
+        let mut value = value.clone();
+        if let Some(object) = value.as_object_mut() {
+            object.insert("req".into(), self.request_id.into());
+        }
+        let payload = serde_json::to_vec(&value)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let mut output = self
+            .output
+            .lock()
+            .map_err(|_| io::Error::other("capture reply writer poisoned"))?;
+        write_frame(&mut *output, &payload)
+    }
+}
+
+impl fmt::Debug for Capture {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Capture")
+            .field("action", &self.action)
+            .field("request_id", &self.request_id)
+            .field("url", &self.url)
+            .field("page", &self.page)
+            .field("src", &self.src)
+            .field("title", &self.title)
+            .field("has_reply", &self.reply.is_some())
+            .finish()
+    }
 }
 
 impl Capture {
@@ -90,18 +170,43 @@ mod imp {
         PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
     };
 
-    use super::{Capture, PIPE, read_frame};
+    use super::{Capture, CaptureReply, PIPE, read_frame};
 
-    /// `PIPE_ACCESS_INBOUND`：windows-sys 0.61 没导出这个常量，它就是 `FILE_READ_DATA`。
-    const PIPE_ACCESS_INBOUND: u32 = 0x0000_0001;
+    /// `windows-sys` of this workspace does not export the access-mode constants.
+    /// `PIPE_ACCESS_DUPLEX` is `FILE_READ_DATA | FILE_WRITE_DATA`.
+    const PIPE_ACCESS_DUPLEX: u32 = 0x0000_0003;
 
     /// 管道上的 JSON → `Capture`。坏消息只丢那一条，不让整条管道停摆。
-    fn parse(payload: &[u8]) -> Option<Capture> {
-        let c: Capture = serde_json::from_slice(payload).ok()?;
-        let url = c.url.trim();
-        if !(url.starts_with("http://") || url.starts_with("https://")) {
+    fn parse(payload: &[u8], output: std::fs::File) -> Option<Capture> {
+        let mut c: Capture = serde_json::from_slice(payload).ok()?;
+        let action = if c.action.is_empty() {
+            "download"
+        } else {
+            c.action.as_str()
+        };
+        let target = if c.url.trim().is_empty() {
+            c.page.trim()
+        } else {
+            c.url.trim()
+        };
+        let web_target = target.starts_with("http://") || target.starts_with("https://");
+        let known = matches!(
+            action,
+            "download"
+                | "ping"
+                | "rules"
+                | "videoLookup"
+                | "videoPoll"
+                | "videoPick"
+                | "video"
+                | "media"
+                | "mediaDownload"
+                | "open"
+        );
+        if !known || (!web_target && !matches!(action, "ping" | "rules")) {
             return None;
         }
+        c.reply = Some(CaptureReply::new(c.request_id, output));
         Some(c)
     }
 
@@ -123,7 +228,7 @@ mod imp {
                         let handle = unsafe {
                             CreateNamedPipeW(
                                 wide(PIPE).as_ptr(),
-                                PIPE_ACCESS_INBOUND,
+                                PIPE_ACCESS_DUPLEX,
                                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
                                 PIPE_UNLIMITED_INSTANCES,
                                 4096,
@@ -142,14 +247,20 @@ mod imp {
                             continue;
                         }
                         let mut conn = unsafe { File::from_raw_handle(handle as _) };
+                        // Native messaging is request/response now, but reading a
+                        // second frame keeps old one-way senders working.
                         while let Ok(frame) = read_frame(&mut conn) {
-                            let Some(c) = parse(&frame) else { continue };
+                            let writer = match conn.try_clone() {
+                                Ok(writer) => writer,
+                                Err(_) => break,
+                            };
+                            let Some(c) = parse(&frame, writer) else {
+                                continue;
+                            };
                             if tx.send(c).is_ok() {
                                 notify.notify();
                             }
                         }
-                        // 对端关掉了：File 析构时 CloseHandle，下一轮再建一个实例。
-                        drop(conn);
                     }
                 })
                 .expect("spawn capture thread");
@@ -234,5 +345,22 @@ mod tests {
             c.headers(),
             vec![("Referer".to_string(), "http://b/".to_string())]
         );
+    }
+
+    #[test]
+    fn video_requests_keep_domain_scoped_cookies() {
+        let c: Capture = serde_json::from_str(
+            r#"{
+                "req":7,
+                "type":"videoLookup",
+                "page":"https://videos.test/watch",
+                "src":"https://cdn.test/master.m3u8",
+                "cookies":[{"name":"sid","value":"a","domain":".videos.test","path":"/"}]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(c.request_id, 7);
+        assert_eq!(c.action, "videoLookup");
+        assert_eq!(c.cookies[0].domain, ".videos.test");
     }
 }

@@ -1,26 +1,46 @@
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use gpui_kit::assets::IconName;
 use gpui_kit::base::StyledExt;
 use gpui_kit::component::{
-    ActiveTheme, Disableable, Icon, IconName, Selectable, Theme, ThemeMode, TitleBar, WindowExt,
+    Disableable, FocusableExt, Icon, IndexPath, Selectable, Sizable, Size, TitleBar, WindowExt,
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
-    input::{Input, InputState},
+    input::{Input, InputEvent, InputState},
+    menu::{ContextMenuExt, PopupMenuItem},
     progress::Progress,
+    scroll::ScrollableElement,
+    searchable_list::SearchableVec,
+    select::{Select, SelectEvent, SelectState},
+    spinner::Spinner,
     switch::Switch,
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use volant_app_core::capture::{Capture, Listener};
+use volant_app_core::capture::{Capture, CaptureReply, Listener};
 use volant_app_core::clipboard::Watch;
 use volant_app_core::control::{Cmd, Control, UiEvent};
 use volant_app_core::fmt;
 use volant_app_core::model::{
-    Kind, Paths, Persisted, Row, Settings, Status, Store, ThemeMode as AppThemeMode, TorrentFile,
-    friendly_error, is_magnet, writable_download_dir,
+    Kind, Paths, Persisted, ProxyMode, Row, Settings, Status, Store, ThemeMode as AppThemeMode,
+    TorrentFile, friendly_error, is_magnet, is_valid_http_proxy, writable_download_dir,
 };
 use volant_app_core::notify::{Notifier, UiNotifier};
+use volant_app_core::video::{self, VideoContext, VideoLookup, VideoTask};
+
+use crate::theme::{self, VolantColors};
+
+const ERROR_COPY: &str = "无法读取这个链接。请检查链接是否有效，或确认服务器允许下载。";
+const RATE_VALUES: [Option<u64>; 5] = [
+    None,
+    Some(1_048_576),
+    Some(5_242_880),
+    Some(10_485_760),
+    Some(20_971_520),
+];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Filter {
@@ -48,6 +68,15 @@ impl Filter {
             Filter::Active => "active",
             Filter::Done => "done",
             Filter::Failed => "failed",
+        }
+    }
+
+    fn icon(self) -> IconName {
+        match self {
+            Filter::All => IconName::List,
+            Filter::Active => IconName::Download,
+            Filter::Done => IconName::Check,
+            Filter::Failed => IconName::CircleX,
         }
     }
 
@@ -82,7 +111,14 @@ enum AddPreview {
         size: Option<u64>,
         final_url: String,
     },
-    Failed(String),
+    Failed,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum AddSource {
+    Http(String),
+    Magnet(String),
+    Torrent(PathBuf),
 }
 
 struct AddDownloadView {
@@ -91,39 +127,150 @@ struct AddDownloadView {
     preview_id: u64,
     requested_url: Option<String>,
     preview: AddPreview,
+    source: Option<AddSource>,
+    preview_generation: u64,
+    preview_task: Option<Task<()>>,
+    headers: Vec<(String, String)>,
+    destination: PathBuf,
+    focus_requested: bool,
+    _input_subscription: Subscription,
 }
 
 impl AddDownloadView {
-    fn new(parent: WeakEntity<VolantShell>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        parent: WeakEntity<VolantShell>,
+        destination: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("粘贴链接，或拖入 .torrent 文件"));
+        let _input_subscription = cx.subscribe_in(
+            &input,
+            window,
+            |this: &mut Self, _, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => {
+                    this.preview = AddPreview::Empty;
+                    this.requested_url = None;
+                    this.headers.clear();
+                    this.source = this.source_from_input(cx);
+                    this.schedule_auto_preview(window, cx);
+                    cx.notify();
+                }
+                InputEvent::PressEnter { .. } => {
+                    if this.is_ready(cx) {
+                        this.submit_now(window, cx);
+                    } else {
+                        this.start_preview(cx);
+                    }
+                }
+                _ => {}
+            },
+        );
+        input.update(cx, |input, cx| input.focus(window, cx));
         Self {
             parent,
-            input: cx.new(|cx| {
-                InputState::new(window, cx)
-                    .placeholder("粘贴 HTTP / HTTPS 链接，例如 https://example.com/file.zip")
-            }),
+            input,
             preview_id: 0,
             requested_url: None,
             preview: AddPreview::Empty,
+            source: None,
+            preview_generation: 0,
+            preview_task: None,
+            headers: Vec::new(),
+            destination,
+            focus_requested: false,
+            _input_subscription,
         }
     }
 
-    fn request_preview(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let url = self.input.read(cx).value().trim().to_string();
-        if !(url.starts_with("http://") || url.starts_with("https://")) {
-            self.preview = AddPreview::Failed("请输入有效的 HTTP 或 HTTPS 链接".into());
-            cx.notify();
+    fn source_from_input(&self, cx: &App) -> Option<AddSource> {
+        let value = self.input.read(cx).value().trim().to_string();
+        if value.starts_with("http://") || value.starts_with("https://") {
+            Some(AddSource::Http(value))
+        } else if is_magnet(&value) {
+            Some(AddSource::Magnet(value))
+        } else if value.to_ascii_lowercase().ends_with(".torrent") && Path::new(&value).is_file() {
+            Some(AddSource::Torrent(PathBuf::from(value)))
+        } else {
+            None
+        }
+    }
+
+    fn schedule_auto_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.preview_generation = self.preview_generation.wrapping_add(1);
+        let generation = self.preview_generation;
+        self.preview_task.take();
+        self.preview_task = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(380))
+                .await;
+            let _ = this.update_in(cx, |this, _window, cx| {
+                if this.preview_generation == generation {
+                    this.start_preview(cx);
+                }
+            });
+        }));
+    }
+
+    fn start_preview(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.preview, AddPreview::Loading) {
             return;
         }
-        self.preview_id += 1;
+        let source = self.source_from_input(cx).or_else(|| self.source.clone());
+        let Some(source) = source else {
+            self.requested_url = Some(self.input.read(cx).value().to_string());
+            self.preview = AddPreview::Failed;
+            cx.notify();
+            return;
+        };
+        self.preview_id = self.preview_id.wrapping_add(1);
         self.preview_id |= 1_u64 << 63;
         let preview_id = self.preview_id;
-        self.requested_url = Some(url.clone());
+        self.requested_url = Some(match &source {
+            AddSource::Http(url) | AddSource::Magnet(url) => url.clone(),
+            AddSource::Torrent(path) => path.display().to_string(),
+        });
+        self.source = Some(source.clone());
         self.preview = AddPreview::Loading;
+        let headers = self.headers.clone();
         let _ = self.parent.update(cx, |parent, cx| {
-            parent.request_preview(preview_id, url);
+            match source {
+                AddSource::Http(url) => parent.request_preview(preview_id, url, headers),
+                AddSource::Magnet(url) => parent.request_torrent_preview(
+                    preview_id,
+                    volant_app_core::control::TorSource::Magnet(url),
+                ),
+                AddSource::Torrent(path) => parent.request_torrent_preview(
+                    preview_id,
+                    volant_app_core::control::TorSource::File(path),
+                ),
+            }
             cx.notify();
         });
         cx.notify();
+    }
+
+    fn retry_preview(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.start_preview(cx);
+    }
+
+    fn add_torrent(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(path) = volant_app_core::native::pick_torrent_file("选择要读取的种子文件")
+        {
+            self.load_torrent(path, window, cx);
+        }
+    }
+
+    fn load_torrent(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.preview_task.take();
+        self.input.update(cx, |input, cx| {
+            input.set_value(path.display().to_string(), window, cx);
+        });
+        self.source = Some(AddSource::Torrent(path));
+        self.headers.clear();
+        self.preview = AddPreview::Empty;
+        self.start_preview(cx);
     }
 
     fn set_preview(&mut self, id: u64, name: String, size: Option<u64>, final_url: String) {
@@ -136,131 +283,494 @@ impl AddDownloadView {
         }
     }
 
-    fn set_preview_error(&mut self, id: u64, reason: String) {
+    fn set_preview_error(&mut self, id: u64, _: String) {
         if id == self.preview_id {
-            self.preview = AddPreview::Failed(friendly_error(&reason));
+            self.preview = AddPreview::Failed;
         }
     }
 
-    fn submit(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let url = self.input.read(cx).value().trim().to_string();
-        let ready = matches!(&self.preview, AddPreview::Ready { .. })
-            && self.requested_url.as_deref() == Some(url.as_str());
-        if !ready {
-            self.preview = AddPreview::Failed("请先预览并确认文件信息".into());
-            cx.notify();
+    fn set_torrent_preview(&mut self, id: u64, name: String, size: u64) {
+        if id == self.preview_id {
+            let final_url = match &self.source {
+                Some(AddSource::Torrent(path)) => path.display().to_string(),
+                Some(AddSource::Magnet(url)) => url.clone(),
+                _ => String::new(),
+            };
+            self.preview = AddPreview::Ready {
+                name,
+                size: Some(size),
+                final_url,
+            };
+        }
+    }
+
+    fn is_ready(&self, cx: &App) -> bool {
+        let current = self.source_from_input(cx).or_else(|| self.source.clone());
+        matches!(&self.preview, AddPreview::Ready { .. })
+            && current.is_some()
+            && current == self.source
+    }
+
+    fn submit_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.is_ready(cx) || matches!(self.preview, AddPreview::Loading) {
             return;
         }
+        let Some(source) = self.source.clone() else {
+            return;
+        };
+        let headers = self.headers.clone();
         let _ = self.parent.update(cx, |parent, cx| {
-            parent.queue_url(url);
+            match source {
+                AddSource::Http(url) | AddSource::Magnet(url) => {
+                    parent.queue_url_with_headers(url, headers);
+                }
+                AddSource::Torrent(path) => {
+                    parent.queue_torrent_file(&path);
+                }
+            }
             cx.notify();
         });
         window.close_dialog(cx);
     }
 
-    fn set_url(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn submit(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.submit_now(window, cx);
+    }
+
+    fn set_url(
+        &mut self,
+        url: String,
+        headers: Vec<(String, String)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.input.update(cx, |input, cx| {
             input.set_value(url, window, cx);
         });
         self.preview = AddPreview::Empty;
         self.requested_url = None;
+        self.headers = headers;
+        self.source = self.source_from_input(cx);
+        self.schedule_auto_preview(window, cx);
         cx.notify();
+    }
+
+    fn set_destination(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(path) = volant_app_core::native::pick_folder("选择下载目录") {
+            let accepted = self
+                .parent
+                .update(cx, |parent, cx| {
+                    let accepted = parent.set_download_dir(path.clone());
+                    cx.notify();
+                    accepted
+                })
+                .unwrap_or(false);
+            if accepted {
+                self.destination = path;
+                cx.notify();
+            }
+        }
+        let _ = window;
+    }
+
+    fn seed_capture_state(
+        &mut self,
+        state: &str,
+        url: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.input.update(cx, |input, cx| {
+            input.set_value(url, window, cx);
+        });
+        self.requested_url = Some(url.to_string());
+        self.source = self.source_from_input(cx);
+        self.preview = match state {
+            "loading" => AddPreview::Loading,
+            "failed" => AddPreview::Failed,
+            "ready" => AddPreview::Ready {
+                name: "debian-13.2.0-amd64-netinst.iso".into(),
+                size: Some(715_653_120),
+                final_url: url.into(),
+            },
+            _ => AddPreview::Empty,
+        };
+        cx.notify();
+    }
+
+    fn state_area(&self, colors: VolantColors) -> AnyElement {
+        match &self.preview {
+            AddPreview::Empty => div()
+                .h(px(55.0))
+                .flex()
+                .items_center()
+                .px(px(1.0))
+                .text_size(px(theme::text::BODY))
+                .text_color(colors.muted)
+                .child("粘贴链接后显示文件名、大小和保存位置。")
+                .into_any_element(),
+            AddPreview::Loading => div()
+                .h(px(55.0))
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .px(px(1.0))
+                .child(Spinner::new().with_size(Size::Small).color(colors.current))
+                .child(
+                    div()
+                        .text_size(px(theme::text::BODY))
+                        .text_color(colors.muted)
+                        .child("正在读取文件信息…"),
+                )
+                .into_any_element(),
+            AddPreview::Ready {
+                name,
+                size,
+                final_url,
+            } => {
+                let source_label = match &self.source {
+                    Some(AddSource::Http(_)) => source_domain(final_url),
+                    Some(AddSource::Magnet(_)) => "Magnet 链接".to_string(),
+                    Some(AddSource::Torrent(_)) => "本地种子".to_string(),
+                    None => source_domain(final_url),
+                };
+                div()
+                    .h(px(55.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(9.0))
+                    .border_t_1()
+                    .border_b_1()
+                    .border_color(colors.border)
+                    .child(
+                        div()
+                            .w(px(29.0))
+                            .h(px(33.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(6.0))
+                            .border_1()
+                            .border_color(colors.border)
+                            .child(
+                                Icon::new(IconName::File)
+                                    .with_size(Size::Size(px(14.0)))
+                                    .text_color(colors.current),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .v_flex()
+                            .gap(px(3.0))
+                            .child(
+                                div()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(px(13.0))
+                                    .font_weight(FontWeight(600.0))
+                                    .text_color(colors.text)
+                                    .child(name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap(px(5.0))
+                                    .text_size(px(theme::text::BODY))
+                                    .text_color(colors.muted)
+                                    .child(source_label)
+                                    .child(div().text_color(colors.faint).child("支持断点续传")),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(theme::text::BODY))
+                            .font_family("Cascadia Mono")
+                            .text_color(colors.text)
+                            .child(size.map_or_else(|| "大小未知".into(), fmt::bytes)),
+                    )
+                    .child(status_inline_text("可下载", colors.current))
+                    .into_any_element()
+            }
+            AddPreview::Failed => div()
+                .h(px(55.0))
+                .flex()
+                .items_center()
+                .gap(px(12.0))
+                .text_size(px(theme::text::BODY))
+                .text_color(colors.danger)
+                .child(div().flex_1().min_w(px(0.0)).child(ERROR_COPY))
+                .into_any_element(),
+        }
     }
 }
 
 impl Render for AddDownloadView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let muted = theme.muted_foreground;
-        let foreground = theme.foreground;
-        let border = theme.border;
-        let secondary = theme.secondary;
-        let url = self.input.read(cx).value().to_string();
-        let can_submit = matches!(&self.preview, AddPreview::Ready { .. })
-            && self.requested_url.as_deref() == Some(url.as_str());
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.focus_requested {
+            self.focus_requested = true;
+            let handle = self.input.read(cx).focus_handle(cx);
+            window.defer(cx, move |window, cx| handle.focus(window, cx));
+        }
+        let colors = theme::current(cx);
+        let ready = self.is_ready(cx);
+        let failed = matches!(self.preview, AddPreview::Failed);
+        let loading = matches!(self.preview, AddPreview::Loading);
+        let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
+        let border = if failed {
+            colors.danger
+        } else if focused || ready {
+            colors.current.opacity(0.55)
+        } else {
+            colors.border_strong
+        };
+        let destination = self.destination.display().to_string();
+        let state_area = self.state_area(colors);
+        let ready_row = matches!(self.preview, AddPreview::Ready { .. }).then(|| {
+            div()
+                .h(px(36.0))
+                .flex()
+                .items_center()
+                .gap(px(7.0))
+                .border_b_1()
+                .border_color(colors.border)
+                .child(
+                    Icon::new(IconName::Folder)
+                        .with_size(Size::Size(px(12.0)))
+                        .text_color(colors.muted),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .font_family("Cascadia Mono")
+                        .text_size(px(theme::text::BODY))
+                        .text_color(colors.muted)
+                        .child(destination),
+                )
+                .child(
+                    Button::new("change-destination")
+                        .ghost()
+                        .compact()
+                        .label("更改")
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.set_destination(window, cx)),
+                        ),
+                )
+        });
 
         div()
             .v_flex()
-            .gap_3()
             .w_full()
+            .h(px(theme::size::ADD_H))
+            .overflow_hidden()
+            .rounded(px(10.0))
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface)
+            .text_color(colors.text)
+            .key_context("NewDownload")
+            .on_drop::<ExternalPaths>(cx.listener(|this, paths: &ExternalPaths, window, cx| {
+                if let Some(path) = paths.paths().iter().find(|path| {
+                    path.extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("torrent"))
+                }) {
+                    cx.stop_propagation();
+                    this.load_torrent(path.to_path_buf(), window, cx);
+                } else {
+                    this.preview = AddPreview::Failed;
+                    cx.notify();
+                }
+            }))
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                let key = event.keystroke.key.as_str();
+                if key == "escape" && !event.keystroke.modifiers.modified() {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    window.close_dialog(cx);
+                    return;
+                }
+                if key == "enter" && !event.keystroke.modifiers.modified() {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    if this.is_ready(cx) {
+                        this.submit_now(window, cx);
+                    } else {
+                        this.start_preview(cx);
+                    }
+                }
+            }))
+            .child(dialog_title_bar("新建下载", colors))
             .child(
                 div()
-                    .text_size(px(12.0))
-                    .text_color(muted)
-                    .child("链接会先探测文件名、大小和断点续传能力，确认后才加入队列。"),
-            )
-            .child(
-                Input::new(&self.input)
-                    .id("new-download-url")
-                    .aria_label("下载链接")
-                    .w_full(),
-            )
-            .child(
-                div()
-                    .p_4()
-                    .rounded(px(10.0))
-                    .border_1()
-                    .border_color(border)
-                    .bg(secondary)
                     .v_flex()
-                    .gap_1()
-                    .child(match &self.preview {
-                        AddPreview::Empty => div()
-                            .text_size(px(12.0))
-                            .text_color(muted)
-                            .child("尚未预览")
-                            .into_any_element(),
-                        AddPreview::Loading => div()
-                            .text_size(px(12.0))
-                            .text_color(muted)
-                            .child("正在读取文件信息…")
-                            .into_any_element(),
-                        AddPreview::Ready {
-                            name,
-                            size,
-                            final_url,
-                        } => div()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .px(px(24.0))
+                    .pt(px(17.0))
+                    .gap(px(13.0))
+                    .child(
+                        div()
                             .v_flex()
-                            .gap_1()
+                            .gap(px(4.0))
                             .child(
                                 div()
-                                    .text_color(foreground)
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .child(name.clone()),
+                                    .text_size(px(21.0))
+                                    .font_weight(FontWeight(630.0))
+                                    .line_height(px(24.0))
+                                    .child("新建下载"),
                             )
-                            .child(div().text_size(px(11.0)).text_color(muted).child(format!(
-                                "{} · {}",
-                                size.map(fmt::bytes).unwrap_or_else(|| "大小未知".into()),
-                                final_url
-                            )))
-                            .into_any_element(),
-                        AddPreview::Failed(reason) => div()
-                            .text_size(px(12.0))
-                            .text_color(theme.danger)
-                            .child(reason.clone())
-                            .into_any_element(),
-                    }),
+                            .child(
+                                div()
+                                    .text_size(px(theme::text::BODY))
+                                    .text_color(colors.muted)
+                                    .child("粘贴链接，确认后立即开始。"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .h(px(38.0))
+                            .flex()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .relative()
+                                    .child(Styled::h(
+                                        Input::new(&self.input)
+                                            .id("new-download-url")
+                                            .aria_label("下载链接或种子文件")
+                                            .focus_ring(false)
+                                            .border_color(border)
+                                            .pr(px(34.0))
+                                            .w_full(),
+                                        px(38.0),
+                                    ))
+                                    .when(failed, |this| {
+                                        this.child(
+                                            Button::new("retry-preview-icon")
+                                                .ghost()
+                                                .compact()
+                                                .icon(IconName::RotateCcw)
+                                                .accessibility_label("重试读取")
+                                                .tooltip("重试读取")
+                                                .absolute()
+                                                .right(px(4.0))
+                                                .top(px(4.0))
+                                                .w(px(30.0))
+                                                .h(px(30.0))
+                                                .on_click(cx.listener(Self::retry_preview)),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                Button::new("add-torrent-file")
+                                    .secondary()
+                                    .icon(IconName::Plus)
+                                    .label("添加")
+                                    .border_1()
+                                    .border_color(colors.border_strong)
+                                    .h(px(38.0))
+                                    .w(px(76.0))
+                                    .disabled(loading)
+                                    .on_click(cx.listener(Self::add_torrent)),
+                            ),
+                    )
+                    .child(state_area)
+                    .when_some(ready_row, |this, row| this.child(row)),
             )
             .child(
                 div()
+                    .h(px(theme::size::ADD_FOOTER))
+                    .flex_shrink_0()
                     .flex()
-                    .justify_end()
-                    .gap_2()
+                    .items_center()
+                    .justify_between()
+                    .border_t_1()
+                    .border_color(colors.border)
+                    .px(px(24.0))
                     .child(
-                        Button::new("preview-download")
-                            .secondary()
-                            .label("预览")
-                            .on_click(cx.listener(Self::request_preview)),
+                        div()
+                            .text_size(px(theme::text::BODY))
+                            .text_color(colors.faint)
+                            .child("Enter 开始下载"),
                     )
                     .child(
-                        Button::new("confirm-download")
-                            .primary()
-                            .label("立即下载")
-                            .disabled(!can_submit)
-                            .on_click(cx.listener(Self::submit)),
+                        div()
+                            .flex()
+                            .gap(px(8.0))
+                            .child(
+                                Button::new("cancel-new-download")
+                                    .secondary()
+                                    .label("取消")
+                                    .border_1()
+                                    .border_color(colors.border_strong)
+                                    .on_click(|_, window, cx| window.close_dialog(cx)),
+                            )
+                            .child(
+                                Button::new("confirm-download")
+                                    .primary()
+                                    .label("立即下载")
+                                    .disabled(!ready)
+                                    .on_click(cx.listener(Self::submit)),
+                            ),
                     ),
             )
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsCategory {
+    Download,
+    Connection,
+    Proxy,
+    Integration,
+    Appearance,
+}
+
+impl SettingsCategory {
+    const ALL: [Self; 5] = [
+        Self::Download,
+        Self::Connection,
+        Self::Proxy,
+        Self::Integration,
+        Self::Appearance,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Download => "下载",
+            Self::Connection => "连接",
+            Self::Proxy => "代理",
+            Self::Integration => "集成",
+            Self::Appearance => "外观",
+        }
+    }
+
+    fn icon(self) -> IconName {
+        match self {
+            Self::Download => IconName::Download,
+            Self::Connection => IconName::Network,
+            Self::Proxy => IconName::Shield,
+            Self::Integration => IconName::Link,
+            Self::Appearance => IconName::Monitor,
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Download => "控制新任务的并发数量与默认保存位置。",
+            Self::Connection => "调整每个任务的连接数和总下载带宽。",
+            Self::Proxy => "决定新任务如何通过系统网络或指定代理连接。",
+            Self::Integration => "管理浏览器捕获、删除确认和本机宿主连接。",
+            Self::Appearance => "选择跟随系统，或固定浅色和深色外观。",
+        }
     }
 }
 
@@ -268,272 +778,905 @@ struct SettingsView {
     parent: WeakEntity<VolantShell>,
     settings: Settings,
     dir_input: Entity<InputState>,
-    fallback_dir: std::path::PathBuf,
+    proxy_input: Entity<InputState>,
+    limit_select: Entity<SelectState<SearchableVec<String>>>,
+    connections_select: Entity<SelectState<SearchableVec<String>>>,
+    rate_select: Entity<SelectState<SearchableVec<String>>>,
     notice: Option<String>,
+    proxy_notice: Option<String>,
+    category: SettingsCategory,
+    host_status: volant_app_core::native::HostStatus,
+    host_notice: Option<String>,
+    save_error: Option<String>,
+    _dir_subscription: Subscription,
+    _proxy_subscription: Subscription,
+    _limit_select_subscription: Subscription,
+    _connections_select_subscription: Subscription,
+    _rate_select_subscription: Subscription,
 }
 
 impl SettingsView {
     fn new(
         parent: WeakEntity<VolantShell>,
         settings: Settings,
-        fallback_dir: std::path::PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let dir = settings.dir.to_string_lossy().to_string();
+        let dir_input = cx.new(|cx| InputState::new(window, cx).default_value(dir));
+        let proxy_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(settings.proxy_url.clone())
+                .placeholder("http://127.0.0.1:7890")
+        });
+        let limit_select = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new((1..=20).map(|value| value.to_string()).collect::<Vec<_>>()),
+                Some(IndexPath::new(settings.limit.saturating_sub(1))),
+                window,
+                cx,
+            )
+        });
+        let connections_select = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new((1..=32).map(|value| value.to_string()).collect::<Vec<_>>()),
+                Some(IndexPath::new(settings.connections.saturating_sub(1))),
+                window,
+                cx,
+            )
+        });
+        let rate_select = cx.new(|cx| {
+            let selected_index = RATE_VALUES
+                .iter()
+                .position(|rate| *rate == settings.rate)
+                .unwrap_or(0);
+            SelectState::new(
+                SearchableVec::new(
+                    RATE_VALUES
+                        .iter()
+                        .map(|rate| rate_label(*rate))
+                        .collect::<Vec<_>>(),
+                ),
+                Some(IndexPath::new(selected_index)),
+                window,
+                cx,
+            )
+        });
+        let _dir_subscription = cx.subscribe_in(
+            &dir_input,
+            window,
+            |this: &mut Self, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
+                    this.apply_dir(window, cx);
+                }
+            },
+        );
+        let _proxy_subscription = cx.subscribe_in(
+            &proxy_input,
+            window,
+            |this: &mut Self, _, event: &InputEvent, _window, cx| {
+                if matches!(event, InputEvent::Blur | InputEvent::PressEnter { .. }) {
+                    this.apply_manual_proxy(cx);
+                }
+            },
+        );
+        let _limit_select_subscription = cx.subscribe_in(
+            &limit_select,
+            window,
+            |this: &mut Self, _, event: &SelectEvent<SearchableVec<String>>, _, cx| {
+                if let SelectEvent::Confirm(Some(value)) = event
+                    && let Ok(value) = value.parse::<usize>()
+                {
+                    this.set_limit(value, cx);
+                }
+            },
+        );
+        let _connections_select_subscription = cx.subscribe_in(
+            &connections_select,
+            window,
+            |this: &mut Self, _, event: &SelectEvent<SearchableVec<String>>, _, cx| {
+                if let SelectEvent::Confirm(Some(value)) = event
+                    && let Ok(value) = value.parse::<usize>()
+                {
+                    this.set_connections(value, cx);
+                }
+            },
+        );
+        let _rate_select_subscription = cx.subscribe_in(
+            &rate_select,
+            window,
+            |this: &mut Self, _, event: &SelectEvent<SearchableVec<String>>, _, cx| {
+                if let SelectEvent::Confirm(Some(value)) = event
+                    && let Some(rate) = RATE_VALUES
+                        .iter()
+                        .copied()
+                        .find(|rate| rate_label(*rate) == *value)
+                {
+                    this.set_rate(rate, cx);
+                }
+            },
+        );
         Self {
             parent,
-            settings: settings.clone(),
-            dir_input: cx.new(|cx| InputState::new(window, cx).default_value(dir)),
-            fallback_dir,
+            settings,
+            dir_input,
+            proxy_input,
+            limit_select,
+            connections_select,
+            rate_select,
             notice: None,
+            proxy_notice: None,
+            category: SettingsCategory::Download,
+            host_status: volant_app_core::native::host_status(),
+            host_notice: None,
+            save_error: None,
+            _dir_subscription,
+            _proxy_subscription,
+            _limit_select_subscription,
+            _connections_select_subscription,
+            _rate_select_subscription,
         }
     }
 
-    fn apply_cmd(&mut self, command: Cmd, cx: &mut Context<Self>) {
+    fn persist(&mut self, command: Option<Cmd>, cx: &mut Context<Self>) {
         let settings = self.settings.clone();
-        let _ = self.parent.update(cx, |parent, cx| {
-            parent.apply_settings(settings, Some(command));
+        let result = self.parent.update(cx, |parent, cx| {
+            let saved = parent.apply_settings(settings, command);
+            let error = (!saved).then(|| {
+                parent
+                    .notice
+                    .clone()
+                    .unwrap_or_else(|| "无法保存配置文件".into())
+            });
             cx.notify();
+            error
         });
+        if let Ok(error) = result {
+            self.save_error = error;
+        }
         cx.notify();
     }
 
-    fn adjust_limit(&mut self, delta: isize, cx: &mut Context<Self>) {
-        self.settings.limit = (self.settings.limit as isize + delta).clamp(1, 20) as usize;
-        self.apply_cmd(Cmd::SetLimit(self.settings.limit), cx);
+    fn set_limit(&mut self, value: usize, cx: &mut Context<Self>) {
+        self.settings.limit = value.clamp(1, 20);
+        self.persist(Some(Cmd::SetLimit(self.settings.limit)), cx);
     }
 
-    fn adjust_connections(&mut self, delta: isize, cx: &mut Context<Self>) {
-        self.settings.connections =
-            (self.settings.connections as isize + delta).clamp(1, 32) as usize;
-        self.apply_cmd(Cmd::SetConnections(self.settings.connections), cx);
+    fn set_connections(&mut self, value: usize, cx: &mut Context<Self>) {
+        self.settings.connections = value.clamp(1, 32);
+        self.persist(Some(Cmd::SetConnections(self.settings.connections)), cx);
     }
 
-    fn cycle_rate(&mut self, cx: &mut Context<Self>) {
-        const RATES: [Option<u64>; 5] = [
-            None,
-            Some(1_048_576),
-            Some(5_242_880),
-            Some(10_485_760),
-            Some(20_971_520),
-        ];
-        let current = RATES
-            .iter()
-            .position(|rate| *rate == self.settings.rate)
-            .unwrap_or(0);
-        self.settings.rate = RATES[(current + 1) % RATES.len()];
-        self.apply_cmd(Cmd::SetRate(self.settings.rate), cx);
+    fn set_rate(&mut self, rate: Option<u64>, cx: &mut Context<Self>) {
+        self.settings.rate = rate;
+        self.persist(Some(Cmd::SetRate(self.settings.rate)), cx);
+    }
+
+    fn set_proxy_mode(&mut self, mode: ProxyMode, cx: &mut Context<Self>) {
+        self.settings.proxy_mode = mode;
+        if mode == ProxyMode::Manual {
+            let url = self.proxy_input.read(cx).value().trim().to_string();
+            if !is_valid_http_proxy(&url) {
+                self.proxy_notice = Some("请输入包含主机名的完整 HTTP 或 HTTPS 代理地址。".into());
+                cx.notify();
+                return;
+            }
+            self.settings.proxy_url = url.clone();
+            self.proxy_notice = None;
+            self.persist(Some(Cmd::SetProxy { mode, url }), cx);
+        } else {
+            self.proxy_notice = None;
+            self.persist(
+                Some(Cmd::SetProxy {
+                    mode,
+                    url: String::new(),
+                }),
+                cx,
+            );
+        }
+    }
+
+    fn apply_manual_proxy(&mut self, cx: &mut Context<Self>) {
+        let url = self.proxy_input.read(cx).value().trim().to_string();
+        if !is_valid_http_proxy(&url) {
+            self.proxy_notice = Some("请输入包含主机名的完整 HTTP 或 HTTPS 代理地址。".into());
+            cx.notify();
+            return;
+        }
+        self.settings.proxy_mode = ProxyMode::Manual;
+        self.settings.proxy_url = url.clone();
+        self.proxy_notice = None;
+        self.persist(
+            Some(Cmd::SetProxy {
+                mode: ProxyMode::Manual,
+                url,
+            }),
+            cx,
+        );
+    }
+
+    fn install_host(&mut self, cx: &mut Context<Self>) {
+        match volant_app_core::native::install() {
+            Ok(lines) => {
+                self.host_status = volant_app_core::native::host_status();
+                self.host_notice = Some(
+                    lines
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "宿主安装完成。".into()),
+                );
+            }
+            Err(error) => {
+                self.host_notice = Some(format!("宿主安装失败：{error}"));
+            }
+        }
+        cx.notify();
     }
 
     fn apply_dir(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let value = self.dir_input.read(cx).value().trim().to_string();
         if value.is_empty() {
-            self.notice = Some("下载目录不能为空".into());
+            self.notice = Some("下载目录不能为空。请选择可写目录。".into());
+            self.save_error = None;
             cx.notify();
             return;
         }
-        let requested = std::path::PathBuf::from(value);
-        let (dir, note) = writable_download_dir(&requested, &self.fallback_dir);
-        self.settings.dir = dir.clone();
-        let display = dir.to_string_lossy().to_string();
+        let requested = PathBuf::from(value);
+        let (_, note) = writable_download_dir(&requested, &requested);
+        if let Some(reason) = note {
+            self.notice = Some(reason);
+            self.save_error = None;
+            cx.notify();
+            return;
+        }
+        self.notice = None;
+        self.settings.dir = requested.clone();
         self.dir_input.update(cx, |input, cx| {
-            input.set_value(display, window, cx);
+            input.set_value(requested.to_string_lossy().to_string(), window, cx);
         });
-        self.notice = note;
-        self.apply_cmd(Cmd::SetDir(dir), cx);
+        self.persist(Some(Cmd::SetDir(requested)), cx);
     }
 
-    fn toggle_clipboard(&mut self, checked: &bool, _: &mut Window, cx: &mut Context<Self>) {
-        let enabled = *checked;
-        let _ = self.parent.update(cx, |parent, cx| {
-            parent.set_clipboard_enabled(enabled);
-            let mut next = parent.settings.clone();
-            next.clipboard = enabled;
-            parent.settings = next;
-            parent.mark_dirty();
-            parent.save_now();
-            cx.notify();
-        });
+    fn set_clipboard(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.settings.clipboard = enabled;
+        let _ = self.parent.update(cx, |parent, _| {
+            parent.set_clipboard_enabled(enabled);
+        });
+        self.persist(None, cx);
+    }
+
+    fn set_skip_add(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.settings.skip_add_dialog = enabled;
+        self.persist(None, cx);
+    }
+
+    fn set_confirm_delete(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.settings.confirm_delete = enabled;
+        self.persist(None, cx);
+    }
+
+    fn set_theme(&mut self, mode: AppThemeMode, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings.theme = mode;
+        let resolved = theme::resolve_mode(mode, window);
+        theme::apply(cx, resolved);
+        self.persist(None, cx);
+    }
+
+    fn seed_directory_error(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let path = r"Z:\Blocked\Downloads";
+        self.dir_input.update(cx, |input, cx| {
+            input.set_value(path, window, cx);
+        });
+        self.notice = Some(format!(
+            "下载目录 {path} 写不进（系统找不到指定的路径），未更改保存位置"
+        ));
         cx.notify();
     }
 
-    fn set_theme(&mut self, mode: AppThemeMode, cx: &mut Context<Self>) {
-        self.settings.theme = mode;
-        let theme = match mode {
-            AppThemeMode::System => cx.theme().mode,
-            AppThemeMode::Light => ThemeMode::Light,
-            AppThemeMode::Dark => ThemeMode::Dark,
-        };
-        let settings = self.settings.clone();
-        let _ = self.parent.update(cx, |parent, cx| {
-            parent.apply_settings(settings, None);
-            Theme::change(theme, None, cx);
-            cx.notify();
-        });
-        cx.notify();
+    fn setting_group(&self, title: &str, colors: VolantColors) -> Div {
+        div()
+            .pt(px(8.0))
+            .pb(px(4.0))
+            .text_size(px(theme::text::META))
+            .text_color(colors.faint)
+            .child(title.to_string())
     }
 }
 
 impl Render for SettingsView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let muted = theme.muted_foreground;
-        let border = theme.border;
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = theme::current(cx);
         let settings = self.settings.clone();
-        let rate_label = settings.rate.map_or_else(
-            || "不限".to_string(),
-            |rate| format!("{}/s", fmt::bytes(rate)),
+        let limit_control = settings_select(
+            &self.limit_select,
+            "settings-limit-select",
+            "同时下载",
+            colors,
         );
+        let connection_control = settings_select(
+            &self.connections_select,
+            "settings-connections-select",
+            "每任务连接",
+            colors,
+        );
+        let rate_control = settings_select(
+            &self.rate_select,
+            "settings-rate-select",
+            "全局限速",
+            colors,
+        );
+        let category_buttons = SettingsCategory::ALL
+            .into_iter()
+            .map(|category| {
+                let selected = self.category == category;
+                Button::new(format!("settings-category-{}", category.label()))
+                    .ghost()
+                    .selected(selected)
+                    .accessibility_label(category.label())
+                    .w(px(154.0))
+                    .h(px(32.0))
+                    .px(px(8.0))
+                    .rounded(px(7.0))
+                    .when(selected, |this| {
+                        this.border_1().border_color(colors.selected_border)
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.category = category;
+                        if category == SettingsCategory::Integration {
+                            this.host_status = volant_app_core::native::host_status();
+                        }
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .gap(px(9.0))
+                            .child(
+                                Icon::new(category.icon())
+                                    .with_size(Size::Size(px(13.0)))
+                                    .text_color(if selected {
+                                        colors.current
+                                    } else {
+                                        colors.muted
+                                    }),
+                            )
+                            .child(div().text_size(px(13.0)).child(category.label())),
+                    )
+            })
+            .collect::<Vec<_>>();
+        let footer_text = self.save_error.as_deref().unwrap_or("所有更改自动保存");
+        let footer_color = if self.save_error.is_some() {
+            colors.danger
+        } else {
+            colors.success
+        };
+        let config_dir = self
+            .parent
+            .upgrade()
+            .map(|parent| cx.read_entity(&parent, |parent, _| PathBuf::from(&parent.home)));
+        let directory_control = div()
+            .w(px(244.0))
+            .h(px(32.0))
+            .flex()
+            .items_center()
+            .gap(px(7.0))
+            .child(
+                div().flex_1().min_w(px(0.0)).child(Styled::h(
+                    Input::new(&self.dir_input)
+                        .aria_label("下载目录")
+                        .focus_ring(false)
+                        .w_full(),
+                    px(32.0),
+                )),
+            )
+            .child(
+                Button::new("browse-dir")
+                    .secondary()
+                    .border_1()
+                    .border_color(colors.border_strong)
+                    .icon(IconName::FolderOpen)
+                    .accessibility_label("选择下载目录")
+                    .tooltip("选择下载目录")
+                    .w(px(32.0))
+                    .h(px(32.0))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if let Some(path) = volant_app_core::native::pick_folder("选择下载目录")
+                        {
+                            let value = path.to_string_lossy().to_string();
+                            this.dir_input.update(cx, |input, cx| {
+                                input.set_value(value, window, cx);
+                            });
+                            this.apply_dir(window, cx);
+                        }
+                    })),
+            )
+            .into_any_element();
+        let clipboard_control = Switch::new("settings-clipboard")
+            .checked(settings.clipboard)
+            .accessibility_label("监视剪贴板")
+            .color(colors.primary)
+            .on_change(cx.listener(|this, checked, _, cx| this.set_clipboard(*checked, cx)))
+            .into_any_element();
+        let skip_control = Switch::new("settings-skip-add")
+            .checked(settings.skip_add_dialog)
+            .accessibility_label("捕获后直接开始")
+            .color(colors.primary)
+            .on_change(cx.listener(|this, checked, _, cx| this.set_skip_add(*checked, cx)))
+            .into_any_element();
+        let confirm_delete_control = Switch::new("settings-confirm-delete")
+            .checked(settings.confirm_delete)
+            .accessibility_label("删除任务前确认")
+            .color(colors.primary)
+            .on_change(cx.listener(|this, checked, _, cx| this.set_confirm_delete(*checked, cx)))
+            .into_any_element();
+        let theme_control = div()
+            .w(px(180.0))
+            .h(px(32.0))
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .p(px(2.0))
+            .rounded(px(7.0))
+            .border_1()
+            .border_color(colors.border)
+            .child(theme_choice(
+                "系统",
+                AppThemeMode::System,
+                settings.theme,
+                colors,
+                cx,
+            ))
+            .child(theme_choice(
+                "浅色",
+                AppThemeMode::Light,
+                settings.theme,
+                colors,
+                cx,
+            ))
+            .child(theme_choice(
+                "深色",
+                AppThemeMode::Dark,
+                settings.theme,
+                colors,
+                cx,
+            ))
+            .into_any_element();
+        let proxy_mode_control = div()
+            .w(px(240.0))
+            .h(px(32.0))
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .p(px(2.0))
+            .rounded(px(7.0))
+            .border_1()
+            .border_color(colors.border)
+            .child(proxy_choice(
+                "直连",
+                ProxyMode::Direct,
+                settings.proxy_mode,
+                colors,
+                cx,
+            ))
+            .child(proxy_choice(
+                "系统代理",
+                ProxyMode::System,
+                settings.proxy_mode,
+                colors,
+                cx,
+            ))
+            .child(proxy_choice(
+                "手动",
+                ProxyMode::Manual,
+                settings.proxy_mode,
+                colors,
+                cx,
+            ))
+            .into_any_element();
+        let proxy_input_control = div()
+            .w(px(300.0))
+            .child(Styled::h(
+                Input::new(&self.proxy_input)
+                    .aria_label("手动代理地址")
+                    .focus_ring(false)
+                    .disabled(settings.proxy_mode != ProxyMode::Manual)
+                    .w_full(),
+                px(32.0),
+            ))
+            .into_any_element();
+        let host_connected = self
+            .parent
+            .upgrade()
+            .is_some_and(|parent| cx.read_entity(&parent, |parent, _| parent.host_connected));
+        let host_state = if host_connected {
+            "已连接"
+        } else if self.host_status.installed() {
+            "已安装，等待浏览器连接"
+        } else {
+            "未安装"
+        };
+        let host_color = if host_connected || self.host_status.installed() {
+            colors.success
+        } else {
+            colors.danger
+        };
+        let host_control = div()
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .child(status_inline_text(host_state, host_color))
+            .child(
+                Button::new("install-host")
+                    .secondary()
+                    .border_1()
+                    .border_color(colors.border_strong)
+                    .label("安装宿主")
+                    .on_click(cx.listener(|this, _, _, cx| this.install_host(cx))),
+            )
+            .into_any_element();
+        let notice_for_page = self.notice.clone();
+        let proxy_notice_for_page = self.proxy_notice.clone();
+        let host_notice = self.host_notice.clone();
+        let mut page_rows = Vec::new();
+        match self.category {
+            SettingsCategory::Download => {
+                page_rows.push(self.setting_group("并发", colors).into_any_element());
+                page_rows.push(
+                    setting_row(
+                        "同时下载",
+                        "超过上限的任务会留在队列中。",
+                        limit_control,
+                        colors,
+                    )
+                    .into_any_element(),
+                );
+                page_rows.push(self.setting_group("保存", colors).into_any_element());
+                page_rows.push(
+                    setting_row(
+                        "下载目录",
+                        "空间不足或不可写时会提示，不静默换目录。",
+                        directory_control,
+                        colors,
+                    )
+                    .into_any_element(),
+                );
+                if let Some(notice) = notice_for_page {
+                    page_rows.push(
+                        div()
+                            .pb(px(6.0))
+                            .text_size(px(theme::text::META))
+                            .text_color(colors.danger)
+                            .child(notice)
+                            .into_any_element(),
+                    );
+                }
+            }
+            SettingsCategory::Connection => {
+                page_rows.push(self.setting_group("连接", colors).into_any_element());
+                page_rows.push(
+                    setting_row(
+                        "每任务连接",
+                        "按站点反馈自动压低，不需要手动试。",
+                        connection_control,
+                        colors,
+                    )
+                    .into_any_element(),
+                );
+                page_rows.push(
+                    setting_row(
+                        "全局限速",
+                        "只限制 Volant，不影响其他应用。",
+                        rate_control,
+                        colors,
+                    )
+                    .into_any_element(),
+                );
+            }
+            SettingsCategory::Proxy => {
+                page_rows.push(self.setting_group("代理", colors).into_any_element());
+                page_rows.push(
+                    setting_row(
+                        "代理模式",
+                        "直连不使用代理；系统代理读取 Windows 设置。",
+                        proxy_mode_control,
+                        colors,
+                    )
+                    .into_any_element(),
+                );
+                page_rows.push(
+                    setting_row(
+                        "代理地址",
+                        "手动模式支持 HTTP 和 HTTPS 代理。",
+                        proxy_input_control,
+                        colors,
+                    )
+                    .into_any_element(),
+                );
+                if let Some(notice) = proxy_notice_for_page {
+                    page_rows.push(
+                        div()
+                            .pb(px(6.0))
+                            .text_size(px(theme::text::META))
+                            .text_color(colors.danger)
+                            .child(notice)
+                            .into_any_element(),
+                    );
+                }
+            }
+            SettingsCategory::Integration => {
+                page_rows.push(self.setting_group("浏览器捕获", colors).into_any_element());
+                page_rows.push(
+                    setting_row(
+                        "监视剪贴板",
+                        "识别到链接时打开新建下载窗口。",
+                        clipboard_control,
+                        colors,
+                    )
+                    .into_any_element(),
+                );
+                page_rows.push(
+                    setting_row(
+                        "捕获后直接开始",
+                        "跳过确认；重名文件仍会询问。",
+                        skip_control,
+                        colors,
+                    )
+                    .into_any_element(),
+                );
+                page_rows.push(self.setting_group("任务管理", colors).into_any_element());
+                page_rows.push(
+                    setting_row(
+                        "删除任务前确认",
+                        "避免误删未完成的下载。",
+                        confirm_delete_control,
+                        colors,
+                    )
+                    .into_any_element(),
+                );
+                page_rows.push(self.setting_group("浏览器宿主", colors).into_any_element());
+                page_rows.push(
+                    setting_row(
+                        "宿主连接",
+                        "安装后重启浏览器，并加载随包提供的扩展。",
+                        host_control,
+                        colors,
+                    )
+                    .into_any_element(),
+                );
+                if let Some(notice) = host_notice {
+                    page_rows.push(
+                        div()
+                            .py(px(7.0))
+                            .text_size(px(theme::text::META))
+                            .text_color(colors.muted)
+                            .child(notice)
+                            .into_any_element(),
+                    );
+                }
+            }
+            SettingsCategory::Appearance => {
+                page_rows.push(self.setting_group("外观", colors).into_any_element());
+                page_rows.push(
+                    setting_row(
+                        "主题",
+                        "跟随系统或固定为浅色 / 深色。",
+                        theme_control,
+                        colors,
+                    )
+                    .into_any_element(),
+                );
+            }
+        }
 
         div()
             .v_flex()
-            .gap_4()
             .w_full()
-            .child(setting_row(
-                "同时下载",
+            .h(px(theme::size::SETTINGS_H))
+            .overflow_hidden()
+            .rounded(px(10.0))
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface)
+            .text_color(colors.text)
+            .capture_key_down(cx.listener(|_, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key.as_str() == "escape" && !event.keystroke.modifiers.modified()
+                {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    window.close_dialog(cx);
+                }
+            }))
+            .child(dialog_title_bar("Volant · 设置", colors))
+            .child(
                 div()
                     .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        Button::new("limit-minus")
-                            .ghost()
-                            .compact()
-                            .label("−")
-                            .on_click(cx.listener(|this, _, _, cx| this.adjust_limit(-1, cx))),
-                    )
-                    .child(format!("{}", settings.limit))
-                    .child(
-                        Button::new("limit-plus")
-                            .ghost()
-                            .compact()
-                            .label("+")
-                            .on_click(cx.listener(|this, _, _, cx| this.adjust_limit(1, cx))),
-                    )
-                    .into_any_element(),
-                border,
-            ))
-            .child(setting_row(
-                "每任务连接数",
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        Button::new("connections-minus")
-                            .ghost()
-                            .compact()
-                            .label("−")
-                            .on_click(
-                                cx.listener(|this, _, _, cx| this.adjust_connections(-1, cx)),
-                            ),
-                    )
-                    .child(format!("{}", settings.connections))
-                    .child(
-                        Button::new("connections-plus")
-                            .ghost()
-                            .compact()
-                            .label("+")
-                            .on_click(cx.listener(|this, _, _, cx| this.adjust_connections(1, cx))),
-                    )
-                    .into_any_element(),
-                border,
-            ))
-            .child(setting_row(
-                "全局限速",
-                Button::new("rate-cycle")
-                    .secondary()
-                    .label(rate_label)
-                    .on_click(cx.listener(|this, _, _, cx| this.cycle_rate(cx)))
-                    .into_any_element(),
-                border,
-            ))
-            .child(setting_row(
-                "下载目录",
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
+                    .flex_1()
+                    .min_h(px(0.0))
                     .child(
                         div()
-                            .w(px(320.0))
-                            .child(Input::new(&self.dir_input).w_full()),
+                            .w(px(theme::size::SETTINGS_RAIL))
+                            .h_full()
+                            .flex_shrink_0()
+                            .v_flex()
+                            .px(px(11.0))
+                            .pt(px(14.0))
+                            .gap(px(5.0))
+                            .border_r_1()
+                            .border_color(colors.border)
+                            .child(
+                                div()
+                                    .px(px(8.0))
+                                    .pb(px(6.0))
+                                    .text_size(px(theme::text::BODY))
+                                    .text_color(colors.faint)
+                                    .child("设置"),
+                            )
+                            .children(category_buttons),
                     )
                     .child(
-                        Button::new("browse-dir")
-                            .secondary()
-                            .label("浏览")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                if let Some(path) =
-                                    volant_app_core::native::pick_folder("选择下载目录")
-                                {
-                                    let value = path.to_string_lossy().to_string();
-                                    this.dir_input.update(cx, |input, cx| {
-                                        input.set_value(value, window, cx);
-                                    });
-                                    this.apply_dir(window, cx);
+                        div()
+                            .id("settings-form")
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .h_full()
+                            .overflow_y_scrollbar()
+                            .px(px(25.0))
+                            .pt(px(14.0))
+                            .child(
+                                div()
+                                    .text_size(px(21.0))
+                                    .font_weight(FontWeight(620.0))
+                                    .line_height(px(25.0))
+                                    .child(self.category.label()),
+                            )
+                            .child(
+                                div()
+                                    .pt(px(5.0))
+                                    .pb(px(8.0))
+                                    .text_size(px(theme::text::BODY))
+                                    .text_color(colors.muted)
+                                    .child(self.category.description()),
+                            )
+                            .child(div().pt(px(4.0)).border_t_1().border_color(colors.border))
+                            .children(page_rows),
+                    ),
+            )
+            .child(
+                div()
+                    .h(px(theme::size::SETTINGS_FOOTER))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .border_t_1()
+                    .border_color(colors.border)
+                    .px(px(24.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .text_size(px(theme::text::META))
+                            .text_color(colors.muted)
+                            .child(status_dot(footer_color, 4.0))
+                            .child(footer_text.to_string()),
+                    )
+                    .child(
+                        Button::new("open-config-dir")
+                            .ghost()
+                            .compact()
+                            .label("打开配置目录")
+                            .on_click(cx.listener(move |_, _, _, _| {
+                                if let Some(dir) = config_dir.clone() {
+                                    open_directory(&dir);
                                 }
                             })),
-                    )
-                    .child(
-                        Button::new("apply-dir").secondary().label("应用").on_click(
-                            cx.listener(|this, _, window, cx| this.apply_dir(window, cx)),
-                        ),
-                    )
-                    .into_any_element(),
-                border,
-            ))
-            .child(setting_row(
-                "剪贴板监视",
-                Switch::new("settings-clipboard")
-                    .checked(settings.clipboard)
-                    .on_change(cx.listener(Self::toggle_clipboard))
-                    .into_any_element(),
-                border,
-            ))
-            .child(setting_row(
-                "主题",
-                div()
-                    .flex()
-                    .gap_1()
-                    .child(
-                        Button::new("theme-system")
-                            .ghost()
-                            .selected(settings.theme == AppThemeMode::System)
-                            .label("跟随系统")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.set_theme(AppThemeMode::System, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new("theme-light")
-                            .ghost()
-                            .selected(settings.theme == AppThemeMode::Light)
-                            .label("浅色")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.set_theme(AppThemeMode::Light, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new("theme-dark")
-                            .ghost()
-                            .selected(settings.theme == AppThemeMode::Dark)
-                            .label("深色")
-                            .on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.set_theme(AppThemeMode::Dark, cx)
-                                }),
-                            ),
-                    )
-                    .into_any_element(),
-                border,
-            ))
-            .when_some(self.notice.clone(), |this, notice| {
-                this.child(div().text_size(px(12.0)).text_color(muted).child(notice))
-            })
+                    ),
+            )
     }
+}
+
+fn theme_choice(
+    label: &str,
+    mode: AppThemeMode,
+    current: AppThemeMode,
+    colors: VolantColors,
+    cx: &mut Context<SettingsView>,
+) -> Button {
+    let selected = mode == current;
+    Button::new(format!("theme-{}", label))
+        .ghost()
+        .selected(selected)
+        .label(label)
+        .h(px(26.0))
+        .flex_1()
+        .rounded(px(5.0))
+        .when(selected, |this| {
+            this.bg(colors.sunken).text_color(colors.text)
+        })
+        .on_click(cx.listener(move |this, _, window, cx| this.set_theme(mode, window, cx)))
+}
+
+fn proxy_choice(
+    label: &str,
+    mode: ProxyMode,
+    current: ProxyMode,
+    colors: VolantColors,
+    cx: &mut Context<SettingsView>,
+) -> Button {
+    let selected = mode == current;
+    Button::new(format!("proxy-{label}"))
+        .ghost()
+        .selected(selected)
+        .label(label)
+        .h(px(26.0))
+        .flex_1()
+        .rounded(px(5.0))
+        .when(selected, |this| {
+            this.bg(colors.sunken).text_color(colors.text)
+        })
+        .on_click(cx.listener(move |this, _, _, cx| this.set_proxy_mode(mode, cx)))
+}
+
+fn setting_label(label: &str, description: &str, colors: VolantColors) -> Div {
+    div()
+        .v_flex()
+        .gap(px(2.0))
+        .child(
+            div()
+                .text_size(px(13.0))
+                .font_weight(FontWeight(600.0))
+                .child(label.to_string()),
+        )
+        .child(
+            div()
+                .text_size(px(theme::text::META))
+                .text_color(colors.muted)
+                .child(description.to_string()),
+        )
+}
+
+fn setting_row(label: &str, description: &str, control: AnyElement, colors: VolantColors) -> Div {
+    div()
+        .min_h(px(50.0))
+        .max_h(px(58.0))
+        .py(px(6.0))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(16.0))
+        .border_b_1()
+        .border_color(colors.border)
+        .child(setting_label(label, description, colors))
+        .child(control)
+}
+
+fn settings_select(
+    state: &Entity<SelectState<SearchableVec<String>>>,
+    id: &'static str,
+    label: &'static str,
+    colors: VolantColors,
+) -> AnyElement {
+    div()
+        .ml_auto()
+        .w(px(theme::size::SELECT_W))
+        .h(px(32.0))
+        .flex_shrink_0()
+        .child(
+            Select::new(state)
+                .id(id)
+                .accessibility_label(label)
+                .menu_width(px(theme::size::SELECT_W))
+                .menu_max_h(px((theme::size::SELECT_VISIBLE_ITEMS as f32 * 28.0) + 16.0))
+                .focus_ring(false)
+                .w_full()
+                .h_full()
+                .border_1()
+                .border_color(colors.border),
+        )
+        .into_any_element()
 }
 
 struct TorrentPickView {
@@ -565,9 +1708,7 @@ impl TorrentPickView {
 
 impl Render for TorrentPickView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let muted = theme.muted_foreground;
-        let border = theme.border;
+        let colors = theme::current(cx);
         let all_checked = self.checked.iter().all(|checked| *checked);
         let selected_count = self.checked.iter().filter(|checked| **checked).count();
         let selected_size: u64 = self
@@ -577,53 +1718,79 @@ impl Render for TorrentPickView {
             .filter(|(_, checked)| **checked)
             .map(|(file, _)| file.len)
             .sum();
-        let mut rows = Vec::new();
-        for (index, file) in self.files.iter().enumerate() {
-            rows.push(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_3()
-                    .px_2()
-                    .py_1()
-                    .border_b_1()
-                    .border_color(border)
-                    .child(
+        let rows = self.files.iter().enumerate().map(|(index, file)| {
+            div()
+                .h(px(37.0))
+                .flex()
+                .items_center()
+                .gap(px(12.0))
+                .px(px(8.0))
+                .border_b_1()
+                .border_color(colors.border)
+                .child(
+                    div().w(px(24.0)).flex_shrink_0().child(
                         Checkbox::new(("torrent-file", index))
-                            .label(file.name.clone())
+                            .accessibility_label(file.name.clone())
                             .checked(self.checked[index])
                             .on_change(cx.listener(move |this, checked, _, cx| {
                                 this.checked[index] = *checked;
                                 cx.notify();
                             })),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(muted)
-                            .child(fmt::bytes(file.len)),
                     ),
-            );
-        }
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(px(theme::text::BODY))
+                        .text_color(colors.text)
+                        .child(file.name.clone()),
+                )
+                .child(
+                    div()
+                        .w(px(86.0))
+                        .flex_shrink_0()
+                        .text_size(px(theme::text::BODY))
+                        .text_color(colors.muted)
+                        .child(file_kind(&file.name)),
+                )
+                .child(
+                    div()
+                        .w(px(92.0))
+                        .flex_shrink_0()
+                        .text_right()
+                        .text_size(px(theme::text::BODY))
+                        .text_color(colors.muted)
+                        .child(fmt::bytes(file.len)),
+                )
+        });
 
         div()
             .v_flex()
-            .gap_3()
-            .w_full()
+            .w(px(520.0))
+            .gap(px(12.0))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(div().text_size(px(12.0)).text_color(muted).child(format!(
-                        "已选 {selected_count}/{} 个文件 · {}",
-                        self.files.len(),
-                        fmt::bytes(selected_size)
-                    )))
+                    .child(
+                        div()
+                            .text_size(px(theme::text::BODY))
+                            .text_color(colors.muted)
+                            .child(format!(
+                                "已选 {selected_count}/{} 个文件 · {}",
+                                self.files.len(),
+                                fmt::bytes(selected_size)
+                            )),
+                    )
                     .child(
                         Button::new("toggle-all-files")
                             .ghost()
+                            .compact()
                             .label(if all_checked {
                                 "全部取消"
                             } else {
@@ -638,9 +1805,35 @@ impl Render for TorrentPickView {
             )
             .child(
                 div()
+                    .h(px(31.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(12.0))
+                    .px(px(8.0))
+                    .border_b_1()
+                    .border_color(colors.border)
+                    .text_size(px(theme::text::META))
+                    .text_color(colors.faint)
+                    .child(
+                        div().w(px(24.0)).flex_shrink_0().child(
+                            Checkbox::new("torrent-select-all")
+                                .accessibility_label("全选所有文件")
+                                .checked(all_checked)
+                                .on_change(cx.listener(|this, checked, _, cx| {
+                                    this.checked.fill(*checked);
+                                    cx.notify();
+                                })),
+                        ),
+                    )
+                    .child(div().flex_1().min_w(px(0.0)).child("文件"))
+                    .child(div().w(px(86.0)).flex_shrink_0().child("类型"))
+                    .child(div().w(px(92.0)).flex_shrink_0().text_right().child("大小")),
+            )
+            .child(
+                div()
                     .id("torrent-file-list")
                     .max_h(px(340.0))
-                    .overflow_y_scroll()
+                    .overflow_y_scrollbar()
                     .v_flex()
                     .children(rows),
             )
@@ -656,25 +1849,123 @@ impl Render for TorrentPickView {
     }
 }
 
-fn setting_row(label: &str, control: AnyElement, border: Hsla) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap_4()
-        .pb_3()
-        .border_b_1()
-        .border_color(border)
-        .child(label.to_string())
-        .child(control)
+struct DeleteTaskView {
+    parent: WeakEntity<VolantShell>,
+    id: u64,
+    name: String,
+    preferred_delete_files: bool,
+    dont_ask: bool,
+}
+
+impl DeleteTaskView {
+    fn delete(&mut self, delete_files: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let dont_ask = self.dont_ask;
+        let _ = self.parent.update(cx, |parent, cx| {
+            parent.delete_row_with_files(self.id, delete_files, dont_ask);
+            cx.notify();
+        });
+        window.close_dialog(cx);
+    }
+}
+
+impl Render for DeleteTaskView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = theme::current(cx);
+        div()
+            .w(px(360.0))
+            .v_flex()
+            .p(px(20.0))
+            .gap(px(13.0))
+            .rounded(px(10.0))
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface)
+            .text_color(colors.text)
+            .capture_key_down(cx.listener(|_, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key.as_str() == "escape" {
+                    window.close_dialog(cx);
+                }
+            }))
+            .child(
+                div()
+                    .text_size(px(18.0))
+                    .font_weight(FontWeight(620.0))
+                    .child("删除任务？"),
+            )
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .line_height(px(18.0))
+                    .text_color(colors.muted)
+                    .child(format!(
+                        "“{}”可以只从列表移除，也可以同时删除已下载的文件。",
+                        self.name
+                    )),
+            )
+            .child(
+                div()
+                    .pt(px(2.0))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.0))
+                    .child(
+                        Checkbox::new("delete-do-not-ask")
+                            .label("不再显示")
+                            .checked(self.dont_ask)
+                            .on_change(cx.listener(|this, checked, _, cx| {
+                                this.dont_ask = *checked;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_shrink_0()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(
+                                Button::new("cancel-delete")
+                                    .ghost()
+                                    .label("取消")
+                                    .on_click(|_, window, cx| window.close_dialog(cx)),
+                            )
+                            .child(
+                                Button::new("delete-task-only")
+                                    .secondary()
+                                    .border_1()
+                                    .border_color(colors.border_strong)
+                                    .label("删除")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.delete(false, window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("delete-task-files")
+                                    .ghost()
+                                    .border_1()
+                                    .border_color(colors.danger)
+                                    .text_color(colors.danger)
+                                    .label("彻底删除")
+                                    .when(self.preferred_delete_files, |this| {
+                                        this.font_weight(FontWeight(650.0))
+                                    })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.delete(true, window, cx)
+                                    })),
+                            ),
+                    ),
+            )
+    }
 }
 
 struct VolantShell {
     home: String,
-    torrents_dir: std::path::PathBuf,
+    torrents_dir: PathBuf,
     rows: Vec<Row>,
     filter: Filter,
     selected: Option<u64>,
+    detail_open: bool,
     settings: Settings,
     store: Option<Store>,
     control: Option<Control>,
@@ -687,9 +1978,15 @@ struct VolantShell {
     dirty: bool,
     last_save: Instant,
     notice: Option<String>,
-    demo: bool,
+    host_connected: bool,
+    pending_file_deletes: HashMap<u64, PathBuf>,
+    capture_replies: HashMap<u64, CaptureReply>,
+    video_lookups: HashMap<String, VideoLookup>,
+    detail_restore_width: Option<f32>,
+    last_task_click: Option<(u64, Instant)>,
     focus_handle: FocusHandle,
     _events_task: Option<Task<()>>,
+    _appearance_subscription: Subscription,
 }
 
 impl VolantShell {
@@ -702,6 +1999,7 @@ impl VolantShell {
         let (download_dir, dir_note) = writable_download_dir(&saved.settings.dir, &fallback);
         saved.settings.dir = download_dir;
         saved.settings.normalize();
+        theme::apply(cx, theme::resolve_mode(saved.settings.theme, window));
 
         let (rows, control, events_task, clip, capture) = if demo {
             (sample_rows(), None, None, None, None)
@@ -771,15 +2069,22 @@ impl VolantShell {
             )
         };
 
-        let selected = rows.first().map(|row| row.id);
+        let selected = None;
         let focus_handle = cx.focus_handle().tab_stop(true);
         focus_handle.focus(window, cx);
+        let _appearance_subscription = cx.observe_window_appearance(window, |this, window, cx| {
+            if this.settings.theme == AppThemeMode::System {
+                theme::apply(cx, theme::resolve_mode(AppThemeMode::System, window));
+                cx.notify();
+            }
+        });
         Self {
             home: paths.home.display().to_string(),
             torrents_dir: paths.torrents,
             rows,
             filter: Filter::All,
             selected,
+            detail_open: false,
             settings: saved.settings,
             store: (!demo).then_some(store),
             control,
@@ -792,9 +2097,15 @@ impl VolantShell {
             dirty: false,
             last_save: Instant::now(),
             notice: dir_note,
-            demo,
+            host_connected: false,
+            pending_file_deletes: HashMap::new(),
+            capture_replies: HashMap::new(),
+            video_lookups: HashMap::new(),
+            detail_restore_width: None,
+            last_task_click: None,
             focus_handle,
             _events_task: events_task,
+            _appearance_subscription,
         }
     }
 
@@ -842,25 +2153,66 @@ impl VolantShell {
         true
     }
 
-    fn request_preview(&mut self, id: u64, url: String) {
+    fn queue_video(&mut self, task: VideoTask, destination: PathBuf) -> bool {
+        let id = self.next_id;
+        self.next_id += 1;
+        let mut row = Row::video(id, task.clone());
+        row.status = Status::Probing;
+        row.dest = Some(video::expected_path(&task, &destination));
+        self.rows.insert(0, row);
+        self.selected = Some(id);
+        self.filter = Filter::All;
         if let Some(control) = &self.control {
-            control.send(Cmd::PreviewHttp {
+            control.send(Cmd::AddVideo {
                 id,
-                url,
-                headers: Vec::new(),
+                task,
+                destination,
             });
+            self.notice = Some("视频已加入队列".into());
+            self.mark_dirty();
+            self.save_now();
+            true
+        } else {
+            self.notice = Some("视频下载组件尚未启动".into());
+            self.rows.retain(|row| row.id != id);
+            false
+        }
+    }
+
+    fn reply_capture(&mut self, request_id: u64, reply: serde_json::Value) {
+        if let Some(sender) = self.capture_replies.remove(&request_id) {
+            let _ = sender.send(&reply);
+        }
+    }
+
+    fn request_preview(&mut self, id: u64, url: String, headers: Vec<(String, String)>) {
+        if let Some(control) = &self.control {
+            control.send(Cmd::PreviewHttp { id, url, headers });
+        }
+    }
+
+    fn request_torrent_preview(&mut self, id: u64, source: volant_app_core::control::TorSource) {
+        if let Some(control) = &self.control {
+            control.send(Cmd::InspectTorrent { id, source });
         }
     }
 
     fn open_add_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let parent = cx.weak_entity();
-        let view = cx.new(|cx| AddDownloadView::new(parent, window, cx));
+        let destination = self.settings.dir.clone();
+        let view = cx.new(|cx| AddDownloadView::new(parent, destination, window, cx));
         self.add_dialog = Some(view.clone());
+        let colors = theme::current(cx);
         window.open_dialog(cx, move |dialog, _, _| {
             dialog
-                .title("新建下载")
-                .w(px(560.0))
+                .p_0()
+                .gap_0()
+                .w(px(theme::size::ADD_W))
+                .rounded(px(10.0))
+                .border_color(colors.border)
                 .centered()
+                .close_button(false)
+                .on_ok(|_, _, _| false)
                 .child(view.clone())
         });
     }
@@ -868,6 +2220,7 @@ impl VolantShell {
     fn open_add_dialog_with_url(
         &mut self,
         url: String,
+        headers: Vec<(String, String)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -875,21 +2228,148 @@ impl VolantShell {
             self.open_add_dialog(window, cx);
         }
         if let Some(view) = &self.add_dialog {
-            view.update(cx, |view, cx| view.set_url(url, window, cx));
+            view.update(cx, |view, cx| view.set_url(url, headers, window, cx));
         }
     }
 
     fn handle_clipboard_url(&mut self, url: String, window: &mut Window, cx: &mut Context<Self>) {
-        if self.settings.clipboard {
-            self.open_add_dialog_with_url(url, window, cx);
+        if self.settings.clipboard && !window.has_active_dialog(cx) {
+            self.open_add_dialog_with_url(url, Vec::new(), window, cx);
             self.notice = Some("已从剪贴板识别到链接".into());
         }
     }
 
-    fn handle_capture(&mut self, capture: Capture, _window: &mut Window, _cx: &mut Context<Self>) {
+    fn handle_capture(&mut self, capture: Capture, window: &mut Window, cx: &mut Context<Self>) {
+        self.host_connected = true;
+        let action = if capture.action.is_empty() {
+            "download"
+        } else {
+            capture.action.as_str()
+        };
+        let request_id = capture.request_id;
+        let reply = capture.reply.clone();
+        match action {
+            "ping" | "rules" => {
+                if let Some(reply) = reply {
+                    let _ = reply.send(&serde_json::json!({
+                        "ok": true,
+                        "version": env!("CARGO_PKG_VERSION"),
+                        "capture": true,
+                        "videoLookup": true,
+                        "opened": true,
+                    }));
+                }
+                return;
+            }
+            "videoLookup" => {
+                let Some(reply) = reply else {
+                    return;
+                };
+                let context = VideoContext {
+                    page: if capture.page.is_empty() {
+                        capture.url.clone()
+                    } else {
+                        capture.page.clone()
+                    },
+                    src: capture.src.clone(),
+                    title: capture.title.clone(),
+                    referrer: capture.referer.clone(),
+                    user_agent: capture.user_agent.clone(),
+                    cookies: capture.cookies.clone(),
+                };
+                self.capture_replies.insert(request_id, reply);
+                if let Some(control) = &self.control {
+                    control.send(Cmd::VideoLookup {
+                        id: request_id,
+                        context,
+                    });
+                } else {
+                    self.reply_capture(
+                        request_id,
+                        serde_json::json!({"ok": false, "error": "桌面端未启动"}),
+                    );
+                }
+                return;
+            }
+            "videoPoll" => {
+                let lookup = self.video_lookups.get(&capture.token).map_or_else(
+                    || serde_json::json!({"state": "pending"}),
+                    |lookup| serde_json::to_value(lookup).unwrap_or_default(),
+                );
+                self.reply_capture(
+                    request_id,
+                    serde_json::json!({"ok": true, "lookup": lookup}),
+                );
+                return;
+            }
+            "videoPick" => {
+                let Some(lookup) = self.video_lookups.get(&capture.token).cloned() else {
+                    self.reply_capture(
+                        request_id,
+                        serde_json::json!({
+                            "ok": false,
+                            "lookup": {"state": "gone"},
+                            "error": "画质信息已过期，请重新解析"
+                        }),
+                    );
+                    return;
+                };
+                let Some(choice) = lookup.choices.get(capture.choice).cloned() else {
+                    self.reply_capture(
+                        request_id,
+                        serde_json::json!({
+                            "ok": false,
+                            "lookup": {"state": "use-window"},
+                            "error": "没有这个画质"
+                        }),
+                    );
+                    return;
+                };
+                let task = VideoTask {
+                    context: lookup.context.clone(),
+                    choice,
+                    title: lookup.title.clone(),
+                    subtitles: capture.subtitles,
+                };
+                let destination = self.settings.dir.clone();
+                let ok = self.queue_video(task, destination);
+                self.reply_capture(
+                    request_id,
+                    serde_json::json!({
+                        "ok": ok,
+                        "lookup": {"state": if ok { "sent" } else { "failed" }}
+                    }),
+                );
+                cx.notify();
+                return;
+            }
+            "video" | "mediaDownload" => {
+                let target = if capture.src.starts_with("http") {
+                    capture.src.clone()
+                } else {
+                    capture.url.clone()
+                };
+                let ok =
+                    !target.is_empty() && self.queue_url_with_headers(target, capture.headers());
+                self.reply_capture(request_id, serde_json::json!({"ok": ok}));
+                cx.notify();
+                return;
+            }
+            "open" => {
+                window.activate_window();
+                self.reply_capture(request_id, serde_json::json!({"ok": true}));
+                return;
+            }
+            _ => {}
+        }
         if capture.url.is_empty() {
+            self.reply_capture(
+                request_id,
+                serde_json::json!({"ok": false, "error": "下载地址为空"}),
+            );
             return;
         }
+        window.activate_window();
         let lag = now_ms().saturating_sub(capture.t);
         if let Ok(path) = std::env::var("VOLANT_CAPTURE_LOG") {
             use std::io::Write;
@@ -902,9 +2382,22 @@ impl VolantShell {
             }
         }
         let headers = capture.headers();
-        if self.queue_url_with_headers(capture.url, headers) {
+        let accepted = if self.settings.skip_add_dialog {
+            self.queue_url_with_headers(capture.url.clone(), headers.clone())
+        } else {
+            if window.has_active_dialog(cx) && self.add_dialog.is_none() {
+                window.close_dialog(cx);
+                self.settings_dialog = None;
+                self.pick_dialog = None;
+            }
+            self.open_add_dialog_with_url(capture.url.clone(), headers.clone(), window, cx);
             self.notice = Some("已接收浏览器下载请求".into());
-        }
+            true
+        };
+        self.reply_capture(
+            request_id,
+            serde_json::json!({"ok": accepted, "why": if accepted { "" } else { "refused" }}),
+        );
     }
 
     fn handle_external_paths(
@@ -927,7 +2420,7 @@ impl VolantShell {
         cx.notify();
     }
 
-    fn queue_torrent_file(&mut self, path: &std::path::Path) -> bool {
+    fn queue_torrent_file(&mut self, path: &Path) -> bool {
         if !path
             .extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("torrent"))
@@ -964,15 +2457,19 @@ impl VolantShell {
 
     fn open_settings_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let parent = cx.weak_entity();
-        let fallback = std::path::PathBuf::from(&self.home).join("downloads");
-        let view =
-            cx.new(|cx| SettingsView::new(parent, self.settings.clone(), fallback, window, cx));
+        let view = cx.new(|cx| SettingsView::new(parent, self.settings.clone(), window, cx));
         self.settings_dialog = Some(view.clone());
+        let colors = theme::current(cx);
         window.open_dialog(cx, move |dialog, _, _| {
             dialog
-                .title("设置")
-                .w(px(680.0))
+                .p_0()
+                .gap_0()
+                .w(px(theme::size::SETTINGS_W))
+                .rounded(px(10.0))
+                .border_color(colors.border)
                 .centered()
+                .close_button(false)
+                .on_ok(|_, _, _| false)
                 .child(view.clone())
         });
     }
@@ -997,7 +2494,7 @@ impl VolantShell {
         window.open_dialog(cx, move |dialog, _, _| {
             dialog
                 .title(format!("选择下载内容 · {name}"))
-                .w(px(680.0))
+                .w(px(580.0))
                 .centered()
                 .child(view.clone())
         });
@@ -1015,13 +2512,24 @@ impl VolantShell {
         self.save_now();
     }
 
-    fn apply_settings(&mut self, settings: Settings, command: Option<Cmd>) {
+    fn apply_settings(&mut self, settings: Settings, command: Option<Cmd>) -> bool {
         self.settings = settings;
         if let (Some(control), Some(command)) = (&self.control, command) {
             control.send(command);
         }
         self.mark_dirty();
-        self.save_now();
+        self.save_now()
+    }
+
+    fn set_download_dir(&mut self, requested: PathBuf) -> bool {
+        let (checked, note) = writable_download_dir(&requested, &requested);
+        if note.is_some() {
+            self.notice = note;
+            return false;
+        }
+        let mut settings = self.settings.clone();
+        settings.dir = checked.clone();
+        self.apply_settings(settings, Some(Cmd::SetDir(checked)))
     }
 
     fn set_clipboard_enabled(&mut self, enabled: bool) {
@@ -1030,52 +2538,219 @@ impl VolantShell {
         }
     }
 
-    fn confirm_delete(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+    fn confirm_delete(
+        &mut self,
+        id: u64,
+        delete_files: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.settings.confirm_delete {
+            self.delete_row_with_files(id, delete_files, false);
+            cx.notify();
+            return;
+        }
         let Some(row) = self.rows.iter().find(|row| row.id == id).cloned() else {
             return;
         };
         let parent = cx.weak_entity();
         let name = row.display_name().to_string();
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let parent = parent.clone();
-            alert
-                .title("删除任务？")
-                .description(format!("“{name}”将从列表移除，已下载的文件会保留。"))
-                .confirm()
-                .show_cancel(true)
-                .ok_text("删除")
-                .cancel_text("取消")
-                .on_ok(move |_, _, cx| {
-                    let _ = parent.update(cx, |this, cx| {
-                        this.delete_row(id);
-                        cx.notify();
-                    });
-                    true
-                })
+        let view = cx.new(|_| DeleteTaskView {
+            parent,
+            id,
+            name,
+            preferred_delete_files: delete_files,
+            dont_ask: false,
+        });
+        let colors = theme::current(cx);
+        window.open_dialog(cx, move |dialog, _, _| {
+            dialog
+                .w(px(360.0))
+                .centered()
+                .p_0()
+                .gap_0()
+                .border_color(colors.border)
+                .close_button(false)
+                .on_ok(|_, _, _| false)
+                .child(view.clone())
         });
     }
 
-    fn delete_row(&mut self, id: u64) {
+    fn delete_row_with_files(&mut self, id: u64, delete_files: bool, dont_ask: bool) {
         let Some(row) = self.rows.iter().find(|row| row.id == id).cloned() else {
             return;
         };
-        if let Some(control) = &self.control {
-            if row.kind == Kind::Torrent {
-                control.send(Cmd::RemoveTorrent {
-                    id,
-                    delete_files: false,
-                });
-            } else {
+        if dont_ask {
+            self.settings.confirm_delete = false;
+        }
+        if row.kind == Kind::Torrent {
+            if let Some(control) = &self.control {
+                control.send(Cmd::RemoveTorrent { id, delete_files });
+            }
+        } else {
+            if delete_files && let Some(path) = &row.dest {
+                if self.control.is_some() {
+                    self.pending_file_deletes.insert(id, path.clone());
+                } else {
+                    let _ = std::fs::remove_file(path);
+                    volant_app_core::model::remove_leftovers(path);
+                }
+            }
+            if let Some(control) = &self.control {
                 control.send(Cmd::Remove(id));
             }
         }
         self.rows.retain(|row| row.id != id);
-        if self.selected == Some(id) {
-            self.selected = self.rows.first().map(|row| row.id);
-        }
+        self.select_first_visible();
         self.notice = Some("任务已从列表移除".into());
         self.mark_dirty();
         self.save_now();
+    }
+
+    fn retry(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(row) = self.rows.iter().find(|row| row.id == id).cloned() else {
+            return;
+        };
+        let Some(control) = &self.control else {
+            return;
+        };
+        if row.kind == Kind::Torrent {
+            if let Some(path) = row.torrent.clone() {
+                control.send(Cmd::InspectTorrent {
+                    id,
+                    source: volant_app_core::control::TorSource::File(path),
+                });
+            } else {
+                control.send(Cmd::InspectTorrent {
+                    id,
+                    source: volant_app_core::control::TorSource::Magnet(row.url.clone()),
+                });
+            }
+        } else if row.kind == Kind::Video {
+            if let Some(task) = row.video.clone() {
+                control.send(Cmd::AddVideo {
+                    id,
+                    task,
+                    destination: row
+                        .dest
+                        .as_deref()
+                        .and_then(Path::parent)
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|| self.settings.dir.clone()),
+                });
+            }
+        } else if let Some(dest) = row.dest.clone() {
+            control.send(Cmd::Resume {
+                id,
+                url: row.url.clone(),
+                dest,
+                headers: row.headers.clone(),
+            });
+        } else {
+            control.send(Cmd::Add {
+                id,
+                url: row.url.clone(),
+                headers: row.headers.clone(),
+            });
+        }
+        if let Some(row) = self.rows.iter_mut().find(|row| row.id == id) {
+            row.status = Status::Probing;
+            row.error = None;
+            row.speed = 0.0;
+            row.connections = 0;
+        }
+        self.notice = Some("正在重试下载".into());
+        self.mark_dirty();
+        self.save_now();
+        cx.notify();
+    }
+
+    fn start_task(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(status) = self
+            .rows
+            .iter()
+            .find(|row| row.id == id)
+            .map(|row| row.status)
+        else {
+            return;
+        };
+        match status {
+            Status::Paused => self.toggle(id, cx),
+            Status::Failed => self.retry(id, cx),
+            _ => {}
+        }
+    }
+
+    fn pause_task(&mut self, id: u64, cx: &mut Context<Self>) {
+        if self.rows.iter().any(|row| {
+            row.id == id
+                && matches!(
+                    row.status,
+                    Status::Active | Status::Seeding | Status::Queued | Status::Probing
+                )
+        }) {
+            self.toggle(id, cx);
+        }
+    }
+
+    fn activate_task(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(status) = self
+            .rows
+            .iter()
+            .find(|row| row.id == id)
+            .map(|row| row.status)
+        else {
+            return;
+        };
+        match status {
+            Status::Active
+            | Status::Seeding
+            | Status::Queued
+            | Status::Probing
+            | Status::Paused => self.toggle(id, cx),
+            Status::Done => self.open_task_output(id, cx),
+            Status::Failed => self.retry(id, cx),
+        }
+    }
+
+    fn open_task_output(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(path) = self
+            .rows
+            .iter()
+            .find(|row| row.id == id)
+            .and_then(|row| row.dest.clone())
+        else {
+            self.notice = Some("找不到已下载文件的位置".into());
+            cx.notify();
+            return;
+        };
+        if path.is_dir() {
+            open_directory(&path);
+        } else if path.is_file() {
+            let _ = std::process::Command::new("explorer.exe")
+                .arg(&path)
+                .spawn();
+        } else {
+            self.notice = Some("文件已被移动或删除".into());
+            cx.notify();
+        }
+    }
+
+    fn copy_task_link(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(url) = self
+            .rows
+            .iter()
+            .find(|row| row.id == id)
+            .map(|row| row.url.clone())
+        else {
+            return;
+        };
+        if let Some(watch) = &self._clip {
+            watch.ignore_next();
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(url));
+        self.notice = Some("已复制下载链接".into());
+        cx.notify();
     }
 
     fn toggle(&mut self, id: u64, cx: &mut Context<Self>) {
@@ -1093,6 +2768,17 @@ impl VolantShell {
                             id,
                             only: row.only.clone(),
                         });
+                    } else if row.kind == Kind::Video {
+                        if let Some(task) = row.video.clone() {
+                            control.send(Cmd::AddVideo {
+                                id,
+                                task,
+                                destination: dest
+                                    .parent()
+                                    .map(Path::to_path_buf)
+                                    .unwrap_or_else(|| self.settings.dir.clone()),
+                            });
+                        }
                     } else {
                         control.send(Cmd::Resume {
                             id,
@@ -1106,6 +2792,14 @@ impl VolantShell {
                         id,
                         only: row.only.clone(),
                     });
+                } else if row.kind == Kind::Video {
+                    if let Some(task) = row.video.clone() {
+                        control.send(Cmd::AddVideo {
+                            id,
+                            task,
+                            destination: self.settings.dir.clone(),
+                        });
+                    }
                 } else {
                     control.send(Cmd::Add {
                         id,
@@ -1218,6 +2912,18 @@ impl VolantShell {
                 self.mark_dirty();
             }
             UiEvent::Failed { id, reason } => {
+                if id & (1_u64 << 63) != 0 {
+                    if let Some(view) = &self.add_dialog {
+                        view.update(cx, |view, cx| {
+                            view.set_preview_error(id, reason);
+                            cx.notify();
+                        });
+                    }
+                    if let Some(control) = &self.control {
+                        control.send(Cmd::ForgetTorrentPreview(id));
+                    }
+                    return;
+                }
                 if let Some(row) = self.rows.iter_mut().find(|row| row.id == id) {
                     row.status = Status::Failed;
                     row.connections = 0;
@@ -1236,10 +2942,12 @@ impl VolantShell {
                 self.mark_dirty();
             }
             UiEvent::Removed { id } => {
-                self.rows.retain(|row| row.id != id);
-                if self.selected == Some(id) {
-                    self.selected = self.rows.first().map(|row| row.id);
+                if let Some(path) = self.pending_file_deletes.remove(&id) {
+                    let _ = std::fs::remove_file(&path);
+                    volant_app_core::model::remove_leftovers(&path);
                 }
+                self.rows.retain(|row| row.id != id);
+                self.select_first_visible();
                 self.mark_dirty();
             }
             UiEvent::TorrentReady {
@@ -1249,6 +2957,18 @@ impl VolantShell {
                 total,
                 files,
             } => {
+                if id & (1_u64 << 63) != 0 {
+                    if let Some(view) = &self.add_dialog {
+                        view.update(cx, |view, cx| {
+                            view.set_torrent_preview(id, name, total);
+                            cx.notify();
+                        });
+                    }
+                    if let Some(control) = &self.control {
+                        control.send(Cmd::ForgetTorrentPreview(id));
+                    }
+                    return;
+                }
                 if let Some(row) = self.rows.iter_mut().find(|row| row.id == id) {
                     row.name = name.clone();
                     row.size = total;
@@ -1293,6 +3013,16 @@ impl VolantShell {
                 }
                 self.mark_dirty();
             }
+            UiEvent::VideoLookup { id, result } => match result {
+                Ok(lookup) => {
+                    let payload = serde_json::to_value(&lookup).unwrap_or_default();
+                    self.video_lookups.insert(lookup.token.clone(), lookup);
+                    self.reply_capture(id, serde_json::json!({"ok": true, "lookup": payload}));
+                }
+                Err(reason) => {
+                    self.reply_capture(id, serde_json::json!({"ok": false, "error": reason}));
+                }
+            },
             UiEvent::Notice(message) => {
                 self.notice = Some(message);
             }
@@ -1309,10 +3039,10 @@ impl VolantShell {
         }
     }
 
-    fn save_now(&mut self) {
+    fn save_now(&mut self) -> bool {
         let Some(store) = &self.store else {
             self.dirty = false;
-            return;
+            return true;
         };
         let persisted = Persisted {
             version: 1,
@@ -1320,11 +3050,13 @@ impl VolantShell {
             settings: self.settings.clone(),
             rows: self.rows.clone(),
         };
-        if let Err(error) = store.save(&persisted) {
+        let result = store.save(&persisted);
+        if let Err(error) = &result {
             self.notice = Some(format!("保存状态失败：{error}"));
         }
         self.dirty = false;
         self.last_save = Instant::now();
+        result.is_ok()
     }
 
     fn visible_rows(&self) -> Vec<Row> {
@@ -1335,48 +3067,364 @@ impl VolantShell {
             .collect()
     }
 
+    fn select_first_visible(&mut self) {
+        self.selected = self
+            .rows
+            .iter()
+            .find(|row| self.filter.matches(row))
+            .map(|row| row.id);
+    }
+
+    fn select_filter(&mut self, filter: Filter, cx: &mut Context<Self>) {
+        self.filter = filter;
+        self.select_first_visible();
+        cx.notify();
+    }
+
+    fn select_adjacent(&mut self, direction: isize, cx: &mut Context<Self>) {
+        let rows = self.visible_rows();
+        if rows.is_empty() {
+            self.selected = None;
+            cx.notify();
+            return;
+        }
+        let current = self
+            .selected
+            .and_then(|id| rows.iter().position(|row| row.id == id));
+        let next = match (current, direction.is_negative()) {
+            (Some(index), true) => index.saturating_sub(1),
+            (Some(index), false) => (index + 1).min(rows.len() - 1),
+            (None, true) => rows.len() - 1,
+            (None, false) => 0,
+        };
+        self.selected = Some(rows[next].id);
+        cx.notify();
+    }
+
+    fn close_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.detail_open = false;
+        if let Some(width) = self.detail_restore_width.take() {
+            let height = window.viewport_size().height;
+            window.resize(size(px(width), height));
+        }
+        cx.notify();
+    }
+
+    fn fit_inspector_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let viewport = window.viewport_size();
+        let width = viewport.width.as_f32();
+        if !self.detail_open || self.selected.is_none() {
+            if let Some(restore_width) = self.detail_restore_width.take() {
+                window.resize(size(px(restore_width), viewport.height));
+            }
+            return;
+        }
+        if width >= 1200.0 {
+            return;
+        }
+
+        let display_width = window
+            .display(cx)
+            .map(|display| display.visible_bounds().size.width.as_f32())
+            .unwrap_or(width + theme::size::INSPECTOR);
+        let maximum = (display_width - 32.0).max(960.0);
+        let rail_growth = if width < 1000.0 {
+            theme::size::RAIL - theme::size::RAIL_ICON
+        } else {
+            0.0
+        };
+        let target = (width + theme::size::INSPECTOR + rail_growth)
+            .max(1200.0)
+            .min(maximum);
+        if target > width {
+            self.detail_restore_width.get_or_insert(width);
+            window.resize(size(px(target), viewport.height));
+        }
+    }
+
+    fn open_selected_location(&self) {
+        let Some(row) = self
+            .selected
+            .and_then(|id| self.rows.iter().find(|row| row.id == id))
+        else {
+            return;
+        };
+        let path = row
+            .dest
+            .clone()
+            .unwrap_or_else(|| self.settings.dir.clone());
+        open_path(&path, row.dest.is_some());
+    }
+
     fn filter_button(&self, filter: Filter, cx: &mut Context<Self>) -> Button {
         let count = self.rows.iter().filter(|row| filter.matches(row)).count();
+        let selected = self.filter == filter;
         Button::new(ElementId::Name(format!("filter-{}", filter.key()).into()))
             .ghost()
-            .selected(self.filter == filter)
-            .label(format!("{}  {}", filter.label(), count))
+            .selected(selected)
+            .accessibility_label(format!("{}，{} 个任务", filter.label(), count))
+            .h(px(32.0))
             .w_full()
+            .px(px(8.0))
+            .rounded(px(7.0))
             .justify_start()
+            .when(selected, |this| {
+                this.border_1()
+                    .border_color(theme::current(cx).selected_border)
+            })
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap(px(9.0))
+                    .child(
+                        Icon::new(filter.icon())
+                            .with_size(Size::Size(px(13.0)))
+                            .text_color(if selected {
+                                theme::current(cx).current
+                            } else {
+                                theme::current(cx).muted
+                            }),
+                    )
+                    .child(div().flex_1().text_size(px(13.0)).child(filter.label()))
+                    .child(
+                        div()
+                            .text_size(px(theme::text::META))
+                            .font_family("Cascadia Mono")
+                            .text_color(theme::current(cx).faint)
+                            .child(count.to_string()),
+                    ),
+            )
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.filter = filter;
-                this.selected = this
-                    .rows
-                    .iter()
-                    .find(|row| filter.matches(row))
-                    .map(|row| row.id);
-                cx.notify();
+                this.select_filter(filter, cx);
             }))
+    }
+
+    fn speed_band(&self, rows: &[Row], colors: VolantColors) -> Div {
+        let active_rows: Vec<&Row> = rows
+            .iter()
+            .filter(|row| row.status == Status::Active)
+            .collect();
+        let speed = active_rows.iter().map(|row| row.speed).sum::<f64>();
+        let connections = active_rows.iter().map(|row| row.connections).sum::<usize>();
+        let speed_text = fmt::speed(speed);
+        let (speed_value, speed_unit) = speed_text
+            .rsplit_once(' ')
+            .map_or(("—", ""), |(value, unit)| (value, unit));
+        let eta = active_rows
+            .iter()
+            .filter_map(|row| row.eta_secs())
+            .reduce(f64::min)
+            .map_or_else(|| "—".to_string(), |secs| format!("约 {}", fmt::eta(secs)));
+        let sample_source = active_rows
+            .iter()
+            .max_by(|a, b| a.speed.total_cmp(&b.speed))
+            .copied();
+        let mut amplitudes = vec![0.0_f64; 16];
+        let mut has_flow = false;
+        if let Some(row) = sample_source {
+            let recent: Vec<f64> = row
+                .speed_history
+                .iter()
+                .rev()
+                .take(16)
+                .map(|(_, speed)| *speed)
+                .collect();
+            let max = recent.iter().copied().fold(0.0_f64, f64::max);
+            has_flow = max > 0.0;
+            for (index, value) in recent.into_iter().rev().enumerate() {
+                amplitudes[16usize.saturating_sub(recent_len(row)) + index] =
+                    if max > 0.0 { value / max } else { 0.28 };
+            }
+        }
+        let levels = amplitudes
+            .into_iter()
+            .map(|value| value as f32)
+            .collect::<Vec<_>>();
+        let line_color = colors.current;
+        let line = canvas(
+            |_, _, _| {},
+            move |bounds, _, window, _| {
+                if !has_flow || levels.is_empty() {
+                    return;
+                }
+                let step = bounds.size.width / (levels.len() - 1).max(1) as f32;
+                let points = levels
+                    .iter()
+                    .enumerate()
+                    .map(|(index, level)| {
+                        point(
+                            bounds.left() + step * index as f32,
+                            bounds.bottom() - px(5.0 + level.clamp(0.0, 1.0) * 34.0),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+
+                let mut area = PathBuilder::fill();
+                area.move_to(point(points[0].x, bounds.bottom()));
+                area.line_to(points[0]);
+                for index in 1..points.len() {
+                    let previous = points[index - 1];
+                    let current = points[index];
+                    let before = points[index.saturating_sub(2)];
+                    let after = points[(index + 1).min(points.len() - 1)];
+                    let control_a = point(
+                        px(previous.x.as_f32() + (current.x.as_f32() - before.x.as_f32()) / 6.0),
+                        px(previous.y.as_f32() + (current.y.as_f32() - before.y.as_f32()) / 6.0),
+                    );
+                    let control_b = point(
+                        px(current.x.as_f32() - (after.x.as_f32() - previous.x.as_f32()) / 6.0),
+                        px(current.y.as_f32() - (after.y.as_f32() - previous.y.as_f32()) / 6.0),
+                    );
+                    area.cubic_bezier_to(current, control_a, control_b);
+                }
+                area.line_to(point(points[points.len() - 1].x, bounds.bottom()));
+                area.line_to(point(points[0].x, bounds.bottom()));
+                if let Ok(path) = area.build() {
+                    window.paint_path(
+                        path,
+                        linear_gradient(
+                            180.0,
+                            linear_color_stop(line_color.opacity(0.18), 0.0),
+                            linear_color_stop(line_color.opacity(0.01), 1.0),
+                        ),
+                    );
+                }
+
+                let mut stroke = PathBuilder::stroke(px(2.0));
+                stroke.move_to(points[0]);
+                for index in 1..points.len() {
+                    let previous = points[index - 1];
+                    let current = points[index];
+                    let before = points[index.saturating_sub(2)];
+                    let after = points[(index + 1).min(points.len() - 1)];
+                    let control_a = point(
+                        px(previous.x.as_f32() + (current.x.as_f32() - before.x.as_f32()) / 6.0),
+                        px(previous.y.as_f32() + (current.y.as_f32() - before.y.as_f32()) / 6.0),
+                    );
+                    let control_b = point(
+                        px(current.x.as_f32() - (after.x.as_f32() - previous.x.as_f32()) / 6.0),
+                        px(current.y.as_f32() - (after.y.as_f32() - previous.y.as_f32()) / 6.0),
+                    );
+                    stroke.cubic_bezier_to(current, control_a, control_b);
+                }
+                if let Ok(path) = stroke.build() {
+                    window.paint_path(path, line_color);
+                }
+
+                let end = points[points.len() - 1];
+                window.paint_quad(quad(
+                    Bounds {
+                        origin: point(end.x - px(6.0), end.y - px(6.0)),
+                        size: size(px(12.0), px(12.0)),
+                    },
+                    px(99.0),
+                    line_color.opacity(0.14),
+                    px(0.0),
+                    gpui_kit::transparent_black(),
+                    Default::default(),
+                ));
+                window.paint_quad(quad(
+                    Bounds {
+                        origin: point(end.x - px(3.0), end.y - px(3.0)),
+                        size: size(px(6.0), px(6.0)),
+                    },
+                    px(99.0),
+                    line_color,
+                    px(0.0),
+                    gpui_kit::transparent_black(),
+                    Default::default(),
+                ));
+            },
+        )
+        .size_full();
+
+        div()
+            .h(px(theme::size::SPEED_MIN))
+            .min_h(px(theme::size::SPEED_MIN))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap(px(20.0))
+            .px(px(16.0))
+            .py(px(12.0))
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(colors.border)
+            .bg(colors.surface)
+            .child(
+                div()
+                    .w(px(150.0))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_end()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .font_family("Cascadia Mono")
+                            .font_weight(FontWeight(620.0))
+                            .text_size(px(22.0))
+                            .line_height(px(26.0))
+                            .child(speed_value.to_string()),
+                    )
+                    .child(
+                        div()
+                            .pb(px(2.0))
+                            .text_size(px(theme::text::BODY))
+                            .text_color(colors.muted)
+                            .child(speed_unit.to_string()),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .h(px(52.0))
+                    .px(px(12.0))
+                    .child(line),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_shrink_0()
+                    .items_start()
+                    .gap(px(20.0))
+                    .child(speed_meta(
+                        "活动连接",
+                        &format!("{connections} / 8"),
+                        colors,
+                    ))
+                    .child(speed_meta("剩余", &eta, colors)),
+            )
+    }
+
+    fn queue_header(&self, colors: VolantColors) -> Div {
+        div()
+            .h(px(theme::size::QUEUE_HEADER))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap(px(theme::size::ROW_GAP))
+            .px(px(theme::size::ROW_PAD))
+            .border_b_1()
+            .border_color(colors.border)
+            .text_size(px(theme::text::META))
+            .text_color(colors.faint)
+            .child(div().flex_1().min_w(px(0.0)).child("文件"))
+            .child(div().w(px(theme::size::PROGRESS_COL)).child("进度"))
+            .child(div().w(px(theme::size::SIZE_COL)).child("大小"))
+            .child(div().w(px(theme::size::STATUS_COL)).child("状态"))
+            .child(div().w(px(theme::size::ACTION_COL)))
     }
 
     fn transfer_row(
         &self,
         row: Row,
-        narrow: bool,
+        colors: VolantColors,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let theme = cx.theme();
         let selected = self.selected == Some(row.id);
-        let accent = status_color(row.status, theme);
-        let background = if selected {
-            theme.secondary
-        } else {
-            theme.background
-        };
-        let border = if selected { theme.accent } else { theme.border };
-        let muted = theme.muted_foreground;
-        let foreground = theme.foreground;
-        let icon = match row.status {
-            Status::Done => IconName::Check,
-            Status::Failed => IconName::CircleX,
-            Status::Paused => IconName::CircleCheck,
-            _ => IconName::ArrowDown,
-        };
         let id = row.id;
         let percent = fmt::percent(row.downloaded, row.size);
         let size = if row.size == 0 {
@@ -1384,202 +3432,905 @@ impl VolantShell {
         } else {
             fmt::bytes(row.size)
         };
-        let note = if narrow {
-            format!("{} · {} · {}", row.note(), percent, size)
-        } else {
-            row.note()
-        };
-        let can_toggle = matches!(
+        let tone = status_color(row.status, colors);
+        let note = row_note(&row);
+        let context_parent = cx.entity().downgrade();
+        let context_path = row
+            .dest
+            .clone()
+            .unwrap_or_else(|| self.settings.dir.clone());
+        let can_start = matches!(row.status, Status::Paused | Status::Failed);
+        let can_pause = matches!(
             row.status,
-            Status::Active | Status::Seeding | Status::Paused | Status::Queued | Status::Probing
+            Status::Active | Status::Seeding | Status::Queued | Status::Probing
         );
-        let action_label = if row.status == Status::Paused {
-            "继续"
-        } else {
-            "暂停"
+        let can_open = row.status == Status::Done;
+        let toggle_icon = match row.status {
+            Status::Paused => IconName::Play,
+            Status::Failed => IconName::RotateCcw,
+            Status::Done => IconName::FolderOpen,
+            Status::Active | Status::Seeding | Status::Queued | Status::Probing => IconName::Pause,
         };
-        let action = can_toggle.then(|| {
-            Button::new(ElementId::Name(format!("toggle-{id}").into()))
-                .ghost()
-                .compact()
-                .label(action_label)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.toggle(id, cx);
-                }))
-        });
-        let delete = Button::new(ElementId::Name(format!("delete-{id}").into()))
-            .ghost()
-            .compact()
-            .label("删除")
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.confirm_delete(id, window, cx);
-            }));
-        let actions = div()
-            .flex()
-            .flex_shrink_0()
-            .items_center()
-            .gap_1()
-            .when_some(action, |this, action| this.child(action))
-            .child(delete);
-
+        let toggle_label = match row.status {
+            Status::Paused => "开始",
+            Status::Failed => "重试",
+            Status::Active | Status::Seeding | Status::Queued | Status::Probing => "暂停",
+            Status::Done => "打开文件",
+        };
+        let details_open = self.detail_open && self.selected == Some(id);
+        let details_label = if details_open {
+            "收起详情"
+        } else {
+            "展开详情"
+        };
+        let progress = Progress::new(ElementId::Name(format!("row-progress-{id}").into()))
+            .value(row.frac() * 100.0)
+            .color(if row.status == Status::Queued {
+                colors.border_strong
+            } else {
+                colors.current
+            })
+            .with_size(Size::Size(px(3.0)))
+            .w_full();
         div()
             .id(ElementId::Name(format!("transfer-row-{id}").into()))
             .flex()
             .items_center()
             .w_full()
             .min_w(px(0.0))
-            .gap_3()
-            .h(px(78.0))
-            .px_4()
-            .rounded(px(10.0))
-            .border_1()
-            .border_color(border)
-            .bg(background)
+            .min_h(px(theme::size::TASK_ROW))
+            .gap(px(theme::size::ROW_GAP))
+            .px(px(theme::size::ROW_PAD))
+            .py(px(7.0))
+            .rounded(px(6.0))
+            .border_b_1()
+            .border_color(colors.border)
+            .bg(if selected {
+                colors.selected
+            } else {
+                colors.surface
+            })
+            .when(selected, |this| {
+                this.border_1().border_color(colors.selected_border)
+            })
+            .when(!selected, |this| this.hover(|this| this.bg(colors.hover)))
             .cursor_pointer()
-            .child(
-                div()
-                    .size(px(34.0))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(8.0))
-                    .bg(accent.opacity(0.14))
-                    .child(Icon::new(icon).text_color(accent)),
-            )
             .child(
                 div()
                     .flex_1()
                     .min_w(px(0.0))
                     .flex()
-                    .flex_col()
-                    .gap_1()
+                    .items_center()
+                    .gap(px(9.0))
                     .child(
                         div()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_color(foreground)
-                            .child(row.display_name().to_string()),
+                            .w(px(30.0))
+                            .h(px(30.0))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(7.0))
+                            .border_1()
+                            .border_color(if selected {
+                                colors.selected_border
+                            } else {
+                                colors.border
+                            })
+                            .bg(colors.surface)
+                            .child(
+                                Icon::new(IconName::File)
+                                    .with_size(Size::Size(px(14.0)))
+                                    .text_color(colors.muted),
+                            ),
                     )
                     .child(
                         div()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_size(px(12.0))
-                            .text_color(muted)
-                            .child(note),
-                    )
-                    .when(narrow, |this| {
-                        this.child(
-                            Progress::new(ElementId::Name(format!("progress-{id}").into()))
-                                .value(row.frac() * 100.0)
-                                .color(accent)
-                                .w_full(),
-                        )
-                    }),
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .v_flex()
+                            .gap(px(2.0))
+                            .child(
+                                div()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(px(13.0))
+                                    .font_weight(FontWeight(580.0))
+                                    .text_color(colors.text)
+                                    .child(row.display_name().to_string()),
+                            )
+                            .child(
+                                div()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(px(theme::text::META))
+                                    .text_color(colors.muted)
+                                    .child(note),
+                            ),
+                    ),
             )
-            .when(!narrow, |this| {
-                this.child(
-                    div()
-                        .w(px(118.0))
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .child(
-                            Progress::new(ElementId::Name(format!("progress-{id}").into()))
-                                .value(row.frac() * 100.0)
-                                .color(accent)
-                                .w_full(),
-                        )
-                        .child(div().text_size(px(11.0)).text_color(muted).child(percent)),
-                )
-                .child(
-                    div()
-                        .w(px(82.0))
-                        .text_size(px(12.0))
-                        .text_color(foreground)
-                        .child(size),
-                )
-                .child(
-                    div()
-                        .min_w(px(72.0))
-                        .px_2()
-                        .py_1()
-                        .rounded(px(999.0))
-                        .bg(accent.opacity(0.12))
-                        .text_size(px(11.0))
-                        .text_color(accent)
-                        .child(row.status.label()),
-                )
-            })
-            .child(actions)
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .child(
+                div()
+                    .w(px(theme::size::PROGRESS_COL))
+                    .flex_shrink_0()
+                    .v_flex()
+                    .gap(px(5.0))
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .text_size(px(theme::text::META))
+                            .font_family("Cascadia Mono")
+                            .text_color(colors.muted)
+                            .child(if row.status == Status::Active {
+                                fmt::speed(row.speed)
+                            } else {
+                                "—".to_string()
+                            })
+                            .child(percent),
+                    )
+                    .child(progress),
+            )
+            .child(
+                div()
+                    .w(px(theme::size::SIZE_COL))
+                    .flex_shrink_0()
+                    .text_size(px(theme::text::BODY))
+                    .font_family("Cascadia Mono")
+                    .text_color(colors.text)
+                    .child(size),
+            )
+            .child(
+                div()
+                    .w(px(theme::size::STATUS_COL))
+                    .flex_shrink_0()
+                    .child(status_inline_text(status_label(row.status), tone)),
+            )
+            .child(
+                div()
+                    .w(px(theme::size::ACTION_COL))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .gap(px(2.0))
+                    .child(
+                        Button::new(format!("row-toggle-{id}"))
+                            .ghost()
+                            .compact()
+                            .when(can_pause, |this| this.child(pause_glyph(colors)))
+                            .when(!can_pause, |this| this.icon(toggle_icon))
+                            .accessibility_label(toggle_label)
+                            .tooltip(toggle_label)
+                            .text_color(colors.muted)
+                            .w(px(26.0))
+                            .h(px(26.0))
+                            .disabled(!(can_start || can_pause || can_open))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if can_open {
+                                    this.open_task_output(id, cx);
+                                } else if can_start {
+                                    this.start_task(id, cx);
+                                } else {
+                                    this.pause_task(id, cx);
+                                }
+                            })),
+                    )
+                    .child(
+                        Button::new(format!("row-delete-{id}"))
+                            .ghost()
+                            .compact()
+                            .icon(IconName::Trash)
+                            .accessibility_label("删除任务")
+                            .tooltip("删除任务")
+                            .text_color(colors.muted)
+                            .w(px(26.0))
+                            .h(px(26.0))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.confirm_delete(id, false, window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new(format!("row-details-{id}"))
+                            .ghost()
+                            .compact()
+                            .icon(if details_open {
+                                IconName::ChevronLeft
+                            } else {
+                                IconName::ChevronRight
+                            })
+                            .accessibility_label(details_label)
+                            .tooltip(details_label)
+                            .text_color(colors.muted)
+                            .w(px(26.0))
+                            .h(px(26.0))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if this.detail_open && this.selected == Some(id) {
+                                    this.close_detail(window, cx);
+                                } else {
+                                    this.selected = Some(id);
+                                    this.detail_open = true;
+                                    cx.notify();
+                                }
+                            })),
+                    ),
+            )
+            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                if !event.standard_click() {
+                    return;
+                }
+                let now = Instant::now();
+                let repeated = event.click_count() >= 2
+                    || this.last_task_click.is_some_and(|(last_id, last_time)| {
+                        last_id == id && now.duration_since(last_time) <= Duration::from_millis(600)
+                    });
+                this.last_task_click = Some((id, now));
                 this.selected = Some(id);
+                if repeated {
+                    this.last_task_click = None;
+                    this.activate_task(id, cx);
+                }
                 cx.notify();
             }))
+            .context_menu(move |menu, _, _| {
+                let start_parent = context_parent.clone();
+                let pause_parent = context_parent.clone();
+                let delete_parent = context_parent.clone();
+                let purge_parent = context_parent.clone();
+                let copy_parent = context_parent.clone();
+                let task_path = context_path.clone();
+                menu.item(PopupMenuItem::new("开始").disabled(!can_start).on_click(
+                    move |_, _, cx| {
+                        let _ = start_parent.update(cx, |this, cx| this.start_task(id, cx));
+                    },
+                ))
+                .item(
+                    PopupMenuItem::new("暂停")
+                        .disabled(!can_pause)
+                        .on_click(move |_, _, cx| {
+                            let _ = pause_parent.update(cx, |this, cx| this.pause_task(id, cx));
+                        }),
+                )
+                .item(PopupMenuItem::new("删除").on_click(move |_, window, cx| {
+                    let _ = delete_parent.update(cx, |this, cx| {
+                        this.confirm_delete(id, false, window, cx);
+                    });
+                }))
+                .item(
+                    PopupMenuItem::new("彻底删除").on_click(move |_, window, cx| {
+                        let _ = purge_parent.update(cx, |this, cx| {
+                            this.confirm_delete(id, true, window, cx);
+                        });
+                    }),
+                )
+                .item(
+                    PopupMenuItem::new("复制下载链接").on_click(move |_, _, cx| {
+                        let _ = copy_parent.update(cx, |this, cx| this.copy_task_link(id, cx));
+                    }),
+                )
+                .item(
+                    PopupMenuItem::new("打开所在位置")
+                        .on_click(move |_, _, _| open_path(&task_path, true)),
+                )
+            })
+    }
+
+    fn inspector(&self, colors: VolantColors, cx: &mut Context<Self>) -> Div {
+        let selected = self
+            .selected
+            .and_then(|id| self.rows.iter().find(|row| row.id == id))
+            .cloned();
+
+        if let Some(row) = selected {
+            let tone = status_color(row.status, colors);
+            let downloaded = fmt::bytes(row.downloaded);
+            let total = if row.size == 0 {
+                "—".to_string()
+            } else {
+                fmt::bytes(row.size)
+            };
+            let speed = fmt::speed(row.speed);
+            let eta = row
+                .eta_secs()
+                .map_or_else(|| "—".to_string(), |secs| format!("约 {}", fmt::eta(secs)));
+            let path = row
+                .dest
+                .as_ref()
+                .map_or_else(|| self.settings.dir.clone(), |path| path.clone());
+            let path_text = path.display().to_string();
+            let can_toggle = matches!(
+                row.status,
+                Status::Active
+                    | Status::Seeding
+                    | Status::Paused
+                    | Status::Queued
+                    | Status::Probing
+            );
+            let action_label = if row.status == Status::Paused {
+                "继续下载"
+            } else {
+                "暂停下载"
+            };
+            let row_id = row.id;
+            return div()
+                .w(px(theme::size::INSPECTOR))
+                .h_full()
+                .flex_shrink_0()
+                .v_flex()
+                .px(px(18.0))
+                .pt(px(16.0))
+                .pb(px(18.0))
+                .border_l_1()
+                .border_color(colors.border)
+                .bg(colors.rail)
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_size(px(theme::text::META))
+                                .text_color(colors.faint)
+                                .child("任务详情"),
+                        )
+                        .child(
+                            Button::new("close-selected-detail")
+                                .ghost()
+                                .compact()
+                                .icon(IconName::WindowClose)
+                                .accessibility_label("关闭任务详情")
+                                .tooltip("关闭任务详情")
+                                .w(px(28.0))
+                                .h(px(28.0))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.close_detail(window, cx);
+                                })),
+                        ),
+                )
+                .child(
+                    div().pt(px(16.0)).child(
+                        div()
+                            .w(px(48.0))
+                            .h(px(48.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(11.0))
+                            .border_1()
+                            .border_color(colors.border)
+                            .bg(colors.surface)
+                            .child(
+                                Icon::new(IconName::File)
+                                    .with_size(Size::Size(px(23.0)))
+                                    .text_color(colors.current),
+                            ),
+                    ),
+                )
+                .child(
+                    div()
+                        .pt(px(11.0))
+                        .pb(px(9.0))
+                        .text_size(px(16.0))
+                        .line_height(px(20.0))
+                        .font_weight(FontWeight(610.0))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(row.display_name().to_string()),
+                )
+                .child(status_pill(status_label(row.status), tone, colors))
+                .child(divider(colors, true))
+                .child(section_label("传输", colors))
+                .child(detail_value(
+                    "已下载",
+                    &format!("{downloaded} / {total}"),
+                    colors,
+                ))
+                .child(detail_value("当前速度", &speed, colors))
+                .child(detail_value(
+                    "连接",
+                    &if row.connections == 0 {
+                        "—".to_string()
+                    } else {
+                        format!("{} 条 · 自适应", row.connections)
+                    },
+                    colors,
+                ))
+                .child(detail_value("预计剩余", &eta, colors))
+                .child(divider(colors, true))
+                .child(section_label("保存位置", colors))
+                .child(
+                    div()
+                        .py(px(5.0))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .font_family("Cascadia Mono")
+                                .text_size(px(theme::text::META))
+                                .text_color(colors.muted)
+                                .child(path_text),
+                        )
+                        .child(
+                            Button::new("reveal-path")
+                                .ghost()
+                                .compact()
+                                .icon(IconName::Folder)
+                                .accessibility_label("打开所在位置")
+                                .tooltip(format!("打开所在位置\n{}", path.display()))
+                                .w(px(24.0))
+                                .h(px(24.0))
+                                .on_click({
+                                    let path = path.clone();
+                                    move |_, _, _| open_path(&path, true)
+                                }),
+                        ),
+                )
+                .child(detail_value(
+                    "可续传",
+                    if row.resumed_from > 0 || row.status == Status::Paused {
+                        "是"
+                    } else {
+                        "—"
+                    },
+                    colors,
+                ))
+                .when_some(row.error.as_ref(), |this, error| {
+                    this.child(divider(colors, true))
+                        .child(section_label("错误", colors))
+                        .child(
+                            div()
+                                .py(px(5.0))
+                                .text_size(px(theme::text::META))
+                                .line_height(px(14.0))
+                                .text_color(colors.danger)
+                                .child(friendly_error(error)),
+                        )
+                        .child(
+                            Button::new("retry-task")
+                                .ghost()
+                                .compact()
+                                .label("重试")
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| this.retry(row_id, cx)),
+                                ),
+                        )
+                })
+                .child(div().flex_1())
+                .child(
+                    div()
+                        .v_flex()
+                        .gap(px(7.0))
+                        .when(can_toggle, |this| {
+                            this.child(
+                                Button::new("toggle-selected")
+                                    .secondary()
+                                    .border_1()
+                                    .border_color(colors.border_strong)
+                                    .icon(if row.status == Status::Paused {
+                                        IconName::Play
+                                    } else {
+                                        IconName::Pause
+                                    })
+                                    .label(action_label)
+                                    .w_full()
+                                    .on_click(
+                                        cx.listener(move |this, _, _, cx| this.toggle(row_id, cx)),
+                                    ),
+                            )
+                        })
+                        .child(
+                            Button::new("open-selected-location")
+                                .secondary()
+                                .border_1()
+                                .border_color(colors.border_strong)
+                                .icon(IconName::FolderOpen)
+                                .label("打开所在位置")
+                                .w_full()
+                                .on_click(cx.listener(|this, _, _, _| {
+                                    this.open_selected_location();
+                                })),
+                        )
+                        .child(
+                            Button::new("delete-selected-files")
+                                .ghost()
+                                .icon(IconName::Trash)
+                                .label("删除")
+                                .text_color(colors.danger)
+                                .w_full()
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.confirm_delete(row_id, true, window, cx);
+                                })),
+                        ),
+                );
+        }
+
+        div()
+            .w(px(theme::size::INSPECTOR))
+            .h_full()
+            .flex_shrink_0()
+            .v_flex()
+            .px(px(18.0))
+            .pt(px(16.0))
+            .border_l_1()
+            .border_color(colors.border)
+            .bg(colors.rail)
+            .child(
+                div()
+                    .text_size(px(theme::text::META))
+                    .text_color(colors.faint)
+                    .child("任务详情"),
+            )
+            .child(
+                div()
+                    .mt(px(22.0))
+                    .text_size(px(16.0))
+                    .font_weight(FontWeight(610.0))
+                    .child("选择一个任务"),
+            )
+            .child(
+                div()
+                    .mt(px(6.0))
+                    .text_size(px(theme::text::BODY))
+                    .text_color(colors.muted)
+                    .child("从左侧列表选择任务。"),
+            )
+    }
+
+    fn compact_queue_rail(&self, colors: VolantColors, cx: &mut Context<Self>) -> Div {
+        let filters = Filter::ALL
+            .into_iter()
+            .map(|filter| {
+                let count = self.rows.iter().filter(|row| filter.matches(row)).count();
+                let selected = self.filter == filter;
+                Button::new(format!("compact-filter-{}", filter.key()))
+                    .ghost()
+                    .selected(selected)
+                    .icon(filter.icon())
+                    .accessibility_label(format!("{}，{} 个任务", filter.label(), count))
+                    .tooltip(format!("{} · {}", filter.label(), count))
+                    .w(px(40.0))
+                    .h(px(36.0))
+                    .when(selected, |this| {
+                        this.border_1()
+                            .border_color(colors.selected_border)
+                            .bg(colors.selected)
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.select_filter(filter, cx);
+                    }))
+            })
+            .collect::<Vec<_>>();
+
+        div()
+            .w(px(theme::size::RAIL_ICON))
+            .h_full()
+            .flex_shrink_0()
+            .v_flex()
+            .items_center()
+            .justify_between()
+            .py(px(11.0))
+            .bg(colors.rail)
+            .border_r_1()
+            .border_color(colors.border)
+            .child(
+                div()
+                    .v_flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .child(
+                        div()
+                            .w(px(30.0))
+                            .h(px(30.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(7.0))
+                            .bg(colors.primary)
+                            .text_size(px(13.0))
+                            .font_weight(FontWeight(800.0))
+                            .text_color(colors.primary_text)
+                            .child("V"),
+                    )
+                    .child(
+                        Button::new("compact-new-download")
+                            .primary()
+                            .icon(IconName::Plus)
+                            .accessibility_label("新建下载")
+                            .tooltip("新建下载")
+                            .w(px(40.0))
+                            .h(px(36.0))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_add_dialog(window, cx);
+                            })),
+                    )
+                    .child(div().h(px(1.0)).w(px(32.0)).bg(colors.border))
+                    .child(div().v_flex().items_center().gap(px(4.0)).children(filters)),
+            )
+            .child(
+                div()
+                    .v_flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .child(
+                        Button::new("compact-download-directory")
+                            .ghost()
+                            .icon(IconName::Folder)
+                            .accessibility_label("下载目录")
+                            .tooltip("打开下载目录")
+                            .w(px(40.0))
+                            .h(px(36.0))
+                            .on_click({
+                                let path = self.settings.dir.clone();
+                                move |_, _, _| open_directory(&path)
+                            }),
+                    )
+                    .child(
+                        Button::new("compact-settings")
+                            .ghost()
+                            .icon(IconName::Settings)
+                            .accessibility_label("设置")
+                            .tooltip("设置")
+                            .w(px(40.0))
+                            .h(px(36.0))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_settings_dialog(window, cx);
+                            })),
+                    ),
+            )
+    }
+
+    fn queue_rail(
+        &self,
+        colors: VolantColors,
+        cx: &mut Context<Self>,
+        width: f32,
+        compact: bool,
+    ) -> Div {
+        if compact {
+            return self.compact_queue_rail(colors, cx);
+        }
+        let filters = Filter::ALL
+            .into_iter()
+            .map(|filter| self.filter_button(filter, cx))
+            .collect::<Vec<_>>();
+        div()
+            .w(px(width))
+            .h_full()
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .justify_between()
+            .px(px(11.0))
+            .pt(px(11.0))
+            .pb(px(12.0))
+            .bg(colors.rail)
+            .border_r_1()
+            .border_color(colors.border)
+            .child(
+                div()
+                    .v_flex()
+                    .gap(px(11.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(9.0))
+                            .child(
+                                div()
+                                    .w(px(26.0))
+                                    .h(px(26.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(6.0))
+                                    .bg(colors.primary)
+                                    .text_size(px(12.0))
+                                    .font_weight(FontWeight(800.0))
+                                    .text_color(colors.primary_text)
+                                    .child("V"),
+                            )
+                            .child(
+                                div()
+                                    .v_flex()
+                                    .gap(px(1.0))
+                                    .child(
+                                        div()
+                                            .text_size(px(theme::text::META))
+                                            .font_weight(FontWeight(650.0))
+                                            .child("Volant"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(theme::text::META))
+                                            .text_color(colors.muted)
+                                            .child("下载队列"),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        Button::new("ribbon-new-download")
+                            .primary()
+                            .icon(IconName::Plus)
+                            .label("新建下载")
+                            .w_full()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_add_dialog(window, cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .pt(px(5.0))
+                            .px(px(3.0))
+                            .text_size(px(theme::text::META))
+                            .text_color(colors.faint)
+                            .child("队列"),
+                    )
+                    .child(div().v_flex().gap(px(2.0)).children(filters)),
+            )
+            .child(
+                div()
+                    .v_flex()
+                    .gap(px(2.0))
+                    .child(
+                        Button::new("download-directory")
+                            .ghost()
+                            .accessibility_label("下载目录")
+                            .w_full()
+                            .h(px(32.0))
+                            .px(px(8.0))
+                            .child(
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(9.0))
+                                    .justify_start()
+                                    .child(
+                                        Icon::new(IconName::Folder)
+                                            .with_size(Size::Size(px(13.0)))
+                                            .text_color(colors.muted),
+                                    )
+                                    .child(div().child("下载目录")),
+                            )
+                            .on_click({
+                                let path = self.settings.dir.clone();
+                                move |_, _, _| open_directory(&path)
+                            }),
+                    )
+                    .child(
+                        Button::new("settings")
+                            .ghost()
+                            .accessibility_label("设置")
+                            .w_full()
+                            .h(px(32.0))
+                            .px(px(8.0))
+                            .child(
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(9.0))
+                                    .justify_start()
+                                    .child(
+                                        Icon::new(IconName::Settings)
+                                            .with_size(Size::Size(px(13.0)))
+                                            .text_color(colors.muted),
+                                    )
+                                    .child(div().child("设置")),
+                            )
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_settings_dialog(window, cx);
+                            })),
+                    ),
+            )
     }
 }
 
 impl Render for VolantShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // viewport_size is in device pixels; layout and breakpoints are logical.
-        let viewport_width = window.viewport_size().width.as_f32() / window.scale_factor().max(1.0);
-        let compact = viewport_width < 1320.0;
-        let narrow = viewport_width < 1080.0;
-        let sidebar_width = if viewport_width < 900.0 {
-            176.0
-        } else if compact {
-            208.0
+        if window.has_active_dialog(cx) {
+            return div()
+                .size_full()
+                .bg(theme::current(cx).canvas)
+                .into_any_element();
+        }
+        self.add_dialog = None;
+        self.settings_dialog = None;
+        self.pick_dialog = None;
+
+        self.fit_inspector_window(window, cx);
+        let viewport_width = window.viewport_size().width.as_f32();
+        let show_inspector =
+            self.detail_open && self.selected.is_some() && viewport_width >= 1200.0;
+        let compact_rail = viewport_width < 1000.0;
+        let rail_width = if compact_rail {
+            theme::size::RAIL_ICON
         } else {
-            224.0
+            theme::size::RAIL
         };
-        let background = cx.theme().background;
-        let foreground = cx.theme().foreground;
-        let sidebar = cx.theme().sidebar;
-        let sidebar_border = cx.theme().sidebar_border;
-        let border = cx.theme().border;
-        let muted = cx.theme().muted_foreground;
-        let secondary = cx.theme().secondary;
-
-        let mut filters = Vec::new();
-        for filter in Filter::ALL {
-            filters.push(self.filter_button(filter, cx));
-        }
-
+        let colors = theme::current(cx);
         let rows = self.visible_rows();
-        let mut row_elements = Vec::new();
-        for row in &rows {
-            row_elements.push(self.transfer_row(row.clone(), narrow, cx));
-        }
-
-        let selected = self
-            .selected
-            .and_then(|id| self.rows.iter().find(|row| row.id == id))
-            .cloned();
-        let total_speed = fmt::speed(
-            rows.iter()
-                .filter(|row| row.status == Status::Active)
-                .map(|row| row.speed)
-                .sum(),
-        );
-        let connections = rows.iter().map(|row| row.connections).sum::<usize>();
-        let remaining = fmt::bytes(
-            rows.iter()
-                .map(|row| row.size.saturating_sub(row.downloaded))
-                .sum(),
-        );
-        let notice = self.notice.clone();
-        let demo = self.demo;
+        let row_elements = rows
+            .iter()
+            .map(|row| self.transfer_row(row.clone(), colors, cx))
+            .collect::<Vec<_>>();
+        let active_count = rows
+            .iter()
+            .filter(|row| row.status == Status::Active)
+            .count();
+        let count_copy = format!("{} 个任务 · {} 个正在传输", rows.len(), active_count);
+        let rail = self.queue_rail(colors, cx, rail_width, compact_rail);
+        let speed_band = self.speed_band(&rows, colors);
+        let queue_header = self.queue_header(colors);
+        let inspector = self.inspector(colors, cx);
+        let empty = rows.is_empty().then(|| {
+            div()
+                .flex_1()
+                .min_h(px(180.0))
+                .flex()
+                .v_flex()
+                .items_center()
+                .justify_center()
+                .gap(px(7.0))
+                .child(
+                    div()
+                        .w(px(42.0))
+                        .h(px(42.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(10.0))
+                        .bg(colors.sunken)
+                        .child(
+                            Icon::new(IconName::Inbox)
+                                .with_size(Size::Size(px(20.0)))
+                                .text_color(colors.muted),
+                        ),
+                )
+                .child(
+                    div()
+                        .pt(px(4.0))
+                        .text_size(px(16.0))
+                        .font_weight(FontWeight(600.0))
+                        .child("还没有下载任务"),
+                )
+                .child(
+                    div()
+                        .text_size(px(theme::text::BODY))
+                        .text_color(colors.muted)
+                        .child("粘贴链接或从浏览器开始一次下载。"),
+                )
+                .child(
+                    Button::new("empty-add")
+                        .primary()
+                        .icon(IconName::Plus)
+                        .label("添加链接")
+                        .mt(px(5.0))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_add_dialog(window, cx);
+                        })),
+                )
+        });
 
         div()
             .v_flex()
             .size_full()
-            .bg(background)
-            .text_color(foreground)
+            .overflow_hidden()
+            .bg(colors.canvas)
+            .text_color(colors.text)
             .track_focus(&self.focus_handle)
             .key_context("Volant")
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_str();
                 let modifiers = event.keystroke.modifiers;
                 if modifiers.control && key == "n" {
@@ -1589,6 +4340,12 @@ impl Render for VolantShell {
                     return;
                 }
                 if modifiers.modified() {
+                    return;
+                }
+                if key == "escape" && this.detail_open {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    this.close_detail(window, cx);
                     return;
                 }
                 match key {
@@ -1603,8 +4360,18 @@ impl Render for VolantShell {
                         if let Some(id) = this.selected {
                             window.prevent_default();
                             cx.stop_propagation();
-                            this.confirm_delete(id, window, cx);
+                            this.confirm_delete(id, false, window, cx);
                         }
+                    }
+                    "up" => {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        this.select_adjacent(-1, cx);
+                    }
+                    "down" => {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        this.select_adjacent(1, cx);
                     }
                     _ => {}
                 }
@@ -1613,187 +4380,420 @@ impl Render for VolantShell {
                 this.handle_external_paths(paths, window, cx);
             }))
             .child(
-                TitleBar::new().child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            div()
-                                .size(px(20.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(5.0))
-                                .bg(foreground)
-                                .text_color(background)
-                                .child("V"),
-                        )
-                        .child(div().text_size(px(12.5)).child("Volant")),
-                ),
+                TitleBar::new()
+                    .bg(colors.titlebar)
+                    .border_color(colors.border)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(7.0))
+                            .child(
+                                div()
+                                    .w(px(17.0))
+                                    .h(px(17.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(4.0))
+                                    .bg(colors.primary)
+                                    .text_color(colors.primary_text)
+                                    .text_size(px(10.0))
+                                    .font_weight(FontWeight(800.0))
+                                    .child("V"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(theme::text::TITLEBAR))
+                                    .font_weight(FontWeight(600.0))
+                                    .child("Volant"),
+                            ),
+                    ),
             )
             .child(
                 div()
                     .flex()
                     .flex_1()
                     .min_h(px(0.0))
-                    .child(
-                        div()
-                            .w(px(sidebar_width))
-                            .h_full()
-                            .flex()
-                            .flex_col()
-                            .justify_between()
-                            .p_3()
-                            .bg(sidebar)
-                            .border_r_1()
-                            .border_color(sidebar_border)
-                            .child(
-                                div()
-                                    .v_flex()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .px_2()
-                                            .pb_2()
-                                            .text_size(px(11.0))
-                                            .text_color(muted)
-                                            .child("队列"),
-                                    )
-                                    .children(filters),
-                            )
-                            .child(
-                                div()
-                                    .v_flex()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .p_3()
-                                            .rounded(px(8.0))
-                                            .bg(secondary)
-                                            .text_size(px(11.0))
-                                            .text_color(muted)
-                                            .child(format!("配置 {}", self.home)),
-                                    )
-                                    .child(
-                                        Button::new("settings")
-                                            .ghost()
-                                            .label("设置")
-                                            .w_full()
-                                            .justify_start()
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.open_settings_dialog(window, cx);
-                                            })),
-                                    ),
-                            ),
-                    )
+                    .child(rail)
                     .child(
                         div()
                             .flex_1()
                             .min_w(px(0.0))
-                            .overflow_hidden()
                             .h_full()
-                            .flex()
-                            .flex_col()
-                            .p_6()
-                            .gap_4()
+                            .overflow_x_scrollbar()
                             .child(
                                 div()
-                                    .flex()
-                                    .items_end()
-                                    .justify_between()
+                                    .w_full()
+                                    .min_w(px(650.0))
+                                    .h_full()
+                                    .overflow_hidden()
+                                    .v_flex()
+                                    .px(px(theme::size::MAIN_PAD))
+                                    .pt(px(theme::size::MAIN_PAD))
+                                    .pb(px(14.0))
+                                    .gap(px(theme::size::MAIN_GAP))
                                     .child(
                                         div()
-                                            .v_flex()
-                                            .gap_1()
+                                            .flex_shrink_0()
+                                            .flex()
+                                            .items_end()
+                                            .justify_between()
                                             .child(
                                                 div()
-                                                    .text_size(px(26.0))
-                                                    .child(self.filter.label()),
+                                                    .v_flex()
+                                                    .gap(px(2.0))
+                                                    .child(
+                                                        div()
+                                                            .text_size(px(24.0))
+                                                            .line_height(px(28.0))
+                                                            .font_weight(FontWeight(630.0))
+                                                            .child(self.filter.label()),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_size(px(theme::text::META))
+                                                            .text_color(colors.muted)
+                                                            .child(count_copy),
+                                                    ),
                                             )
                                             .child(
-                                                div().text_size(px(12.0)).text_color(muted).child(
-                                                    format!(
-                                                        "{} 个任务 · GPUI Kit{}{}",
-                                                        rows.len(),
-                                                        if demo { " · Demo" } else { "" },
-                                                        " · 真实下载引擎"
-                                                    ),
-                                                ),
+                                                Button::new("add-link")
+                                                    .primary()
+                                                    .icon(IconName::Plus)
+                                                    .label("添加链接")
+                                                    .on_click(cx.listener(
+                                                        |this, _, window, cx| {
+                                                            this.open_add_dialog(window, cx);
+                                                        },
+                                                    )),
                                             ),
                                     )
+                                    .child(speed_band)
                                     .child(
-                                        Button::new("new-download")
-                                            .primary()
-                                            .label("新建下载")
-                                            .icon(IconName::Plus)
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.open_add_dialog(window, cx);
-                                            })),
+                                        div()
+                                            .flex_1()
+                                            .min_h(px(0.0))
+                                            .v_flex()
+                                            .child(queue_header)
+                                            .when_some(empty, |this, empty| this.child(empty))
+                                            .when(!rows.is_empty(), |this| {
+                                                this.child(
+                                                    div()
+                                                        .id("task-list")
+                                                        .flex_1()
+                                                        .min_h(px(0.0))
+                                                        .overflow_y_scrollbar()
+                                                        .children(row_elements),
+                                                )
+                                            }),
                                     ),
-                            )
-                            .when_some(notice, |this, notice| {
-                                this.child(
-                                    div()
-                                        .px_3()
-                                        .py_2()
-                                        .rounded(px(8.0))
-                                        .bg(secondary)
-                                        .text_size(px(12.0))
-                                        .text_color(muted)
-                                        .overflow_hidden()
-                                        .whitespace_nowrap()
-                                        .text_ellipsis()
-                                        .child(notice),
-                                )
-                            })
-                            .child(
-                                div()
-                                    .flex()
-                                    .w_full()
-                                    .min_w(px(0.0))
-                                    .gap_3()
-                                    .child(summary_card(
-                                        "当前速度",
-                                        &total_speed,
-                                        background,
-                                        border,
-                                        foreground,
-                                        muted,
-                                    ))
-                                    .child(summary_card(
-                                        "活动连接",
-                                        &connections.to_string(),
-                                        background,
-                                        border,
-                                        foreground,
-                                        muted,
-                                    ))
-                                    .child(summary_card(
-                                        "剩余", &remaining, background, border, foreground, muted,
-                                    )),
-                            )
-                            .child(
-                                div()
-                                    .v_flex()
-                                    .flex_1()
-                                    .min_h(px(0.0))
-                                    .gap_2()
-                                    .overflow_hidden()
-                                    .children(row_elements),
                             ),
                     )
-                    .when(!compact, |this| {
-                        this.child(detail_panel(
-                            selected.as_ref(),
-                            secondary,
-                            sidebar_border,
-                            foreground,
-                            muted,
-                            cx,
-                        ))
-                    }),
+                    .when(show_inspector, |this| this.child(inspector)),
             )
+            .into_any_element()
+    }
+}
+
+fn dialog_title_bar(title: &str, colors: VolantColors) -> Div {
+    let close_id = format!("dialog-close-{title}");
+    div()
+        .h(px(theme::size::TITLEBAR))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .pl(px(12.0))
+        .bg(colors.titlebar)
+        .border_b_1()
+        .border_color(colors.border)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(7.0))
+                .child(
+                    div()
+                        .w(px(17.0))
+                        .h(px(17.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(4.0))
+                        .bg(colors.primary)
+                        .text_color(colors.primary_text)
+                        .text_size(px(10.0))
+                        .font_weight(FontWeight(800.0))
+                        .child("V"),
+                )
+                .child(
+                    div()
+                        .text_size(px(theme::text::TITLEBAR))
+                        .font_weight(FontWeight(600.0))
+                        .child(title.to_string()),
+                ),
+        )
+        .child(div().flex_1())
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .child(
+                    div()
+                        .w(px(29.0))
+                        .h(px(theme::size::TITLEBAR))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            Icon::new(IconName::WindowMinimize)
+                                .with_size(Size::Size(px(10.0)))
+                                .text_color(colors.muted),
+                        ),
+                )
+                .child(
+                    div()
+                        .w(px(29.0))
+                        .h(px(theme::size::TITLEBAR))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            Icon::new(IconName::WindowMaximize)
+                                .with_size(Size::Size(px(10.0)))
+                                .text_color(colors.muted),
+                        ),
+                )
+                .child(
+                    Button::new(close_id)
+                        .ghost()
+                        .icon(IconName::WindowClose)
+                        .accessibility_label("关闭")
+                        .tooltip("关闭")
+                        .w(px(29.0))
+                        .h(px(theme::size::TITLEBAR))
+                        .rounded(px(0.0))
+                        .on_click(|_, window, cx| window.close_dialog(cx)),
+                ),
+        )
+}
+
+fn speed_meta(label: &str, value: &str, colors: VolantColors) -> Div {
+    div()
+        .v_flex()
+        .gap(px(4.0))
+        .child(
+            div()
+                .text_size(px(theme::text::META))
+                .text_color(colors.faint)
+                .child(label.to_string()),
+        )
+        .child(
+            div()
+                .font_family("Cascadia Mono")
+                .text_size(px(theme::text::BODY))
+                .text_color(colors.text)
+                .child(value.to_string()),
+        )
+}
+
+fn pause_glyph(colors: VolantColors) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(4.0))
+        .child(
+            div()
+                .w(px(2.5))
+                .h(px(12.0))
+                .rounded(px(1.0))
+                .bg(colors.muted),
+        )
+        .child(
+            div()
+                .w(px(2.5))
+                .h(px(12.0))
+                .rounded(px(1.0))
+                .bg(colors.muted),
+        )
+}
+
+fn rate_label(rate: Option<u64>) -> String {
+    rate.map_or_else(
+        || "不限".to_string(),
+        |rate| format!("{}/s", fmt::bytes(rate)),
+    )
+}
+
+fn divider(colors: VolantColors, vertical_margin: bool) -> Div {
+    div()
+        .h(px(1.0))
+        .w_full()
+        .bg(colors.border)
+        .when(vertical_margin, |this| this.my(px(12.0)))
+}
+
+fn section_label(label: &str, colors: VolantColors) -> Div {
+    div()
+        .pb(px(5.0))
+        .text_size(px(theme::text::META))
+        .text_color(colors.faint)
+        .child(label.to_string())
+}
+
+fn detail_value(label: &str, value: &str, colors: VolantColors) -> Div {
+    div()
+        .min_h(px(22.0))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(10.0))
+        .text_size(px(theme::text::META))
+        .child(div().text_color(colors.faint).child(label.to_string()))
+        .child(
+            div()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .font_family("Cascadia Mono")
+                .text_size(px(theme::text::META))
+                .text_color(colors.text)
+                .child(value.to_string()),
+        )
+}
+
+fn status_label(status: Status) -> &'static str {
+    match status {
+        Status::Active => "下载中",
+        Status::Probing => "正在读取",
+        Status::Queued => "等待",
+        Status::Paused => "已暂停",
+        Status::Done => "已完成",
+        Status::Seeding => "做种中",
+        Status::Failed => "失败",
+    }
+}
+
+fn status_color(status: Status, colors: VolantColors) -> Hsla {
+    match status {
+        Status::Active | Status::Probing => colors.current,
+        Status::Queued => colors.faint,
+        Status::Paused => colors.warning,
+        Status::Done | Status::Seeding => colors.success,
+        Status::Failed => colors.danger,
+    }
+}
+
+fn status_dot(color: Hsla, size: f32) -> Div {
+    div()
+        .w(px(size))
+        .h(px(size))
+        .flex_shrink_0()
+        .rounded_full()
+        .bg(color)
+}
+
+fn status_inline_text(label: &str, color: Hsla) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .text_size(px(theme::text::META))
+        .text_color(color)
+        .child(status_dot(color, 6.0))
+        .child(label.to_string())
+}
+
+fn status_pill(label: &str, color: Hsla, colors: VolantColors) -> Div {
+    div()
+        .self_start()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .px(px(8.0))
+        .py(px(3.0))
+        .rounded(px(999.0))
+        .bg(color.opacity(0.1))
+        .text_size(px(theme::text::META))
+        .text_color(color)
+        .border_1()
+        .border_color(color.opacity(0.22))
+        .child(status_dot(color, 6.0))
+        .child(label.to_string())
+        .when(colors.current == color, |this| this)
+}
+
+fn row_note(row: &Row) -> String {
+    match row.status {
+        Status::Active => {
+            let eta = row
+                .eta_secs()
+                .map_or_else(String::new, |secs| format!(" · 剩余约 {}", fmt::eta(secs)));
+            if row.connections > 0 {
+                format!("{} 连接{}", row.connections, eta)
+            } else {
+                "正在传输…".into()
+            }
+        }
+        Status::Queued => row.note(),
+        _ => row.note(),
+    }
+}
+
+fn source_domain(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    rest.split(['/', '?', '#'])
+        .next()
+        .unwrap_or(rest)
+        .to_string()
+}
+
+fn file_kind(name: &str) -> String {
+    Path::new(name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .filter(|extension| !extension.is_empty())
+        .map(|extension| extension.to_ascii_uppercase())
+        .unwrap_or_else(|| "文件".to_string())
+}
+
+fn recent_len(row: &Row) -> usize {
+    row.speed_history.len().min(16)
+}
+
+fn open_directory(path: &Path) {
+    let _ = std::fs::create_dir_all(path);
+    open_path(path, false);
+}
+
+fn open_path(path: &Path, reveal_file: bool) {
+    #[cfg(windows)]
+    {
+        if reveal_file && path.is_file() {
+            let _ = std::process::Command::new("explorer.exe")
+                .arg("/select,")
+                .arg(path)
+                .spawn();
+        } else {
+            let directory = if path.is_dir() {
+                path
+            } else {
+                path.parent().unwrap_or(path)
+            };
+            if !directory.exists() {
+                let _ = std::fs::create_dir_all(directory);
+            }
+            let _ = std::process::Command::new("explorer.exe")
+                .arg(directory)
+                .spawn();
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = reveal_file;
+        let _ = std::process::Command::new("xdg-open").arg(path).spawn();
     }
 }
 
@@ -1818,155 +4818,6 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-fn summary_card(
-    label: &str,
-    value: &str,
-    background: Hsla,
-    border: Hsla,
-    foreground: Hsla,
-    muted: Hsla,
-) -> Div {
-    div()
-        .flex_1()
-        .min_w(px(0.0))
-        .overflow_hidden()
-        .p_4()
-        .rounded(px(10.0))
-        .border_1()
-        .border_color(border)
-        .bg(background)
-        .v_flex()
-        .gap_2()
-        .child(
-            div()
-                .text_size(px(11.0))
-                .text_color(muted)
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .child(label.to_string()),
-        )
-        .child(
-            div()
-                .text_size(px(18.0))
-                .text_color(foreground)
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .child(value.to_string()),
-        )
-}
-
-fn detail_panel(
-    row: Option<&Row>,
-    background: Hsla,
-    border: Hsla,
-    foreground: Hsla,
-    muted: Hsla,
-    cx: &mut Context<VolantShell>,
-) -> Div {
-    let accent = row.map_or(muted, |row| status_color(row.status, cx.theme()));
-    let title = row.map_or("选择一个任务", Row::display_name);
-    let status = row.map_or("暂无详情", |row| row.status.label());
-    let note = row.map_or_else(|| "从左侧列表选择任务。".to_string(), Row::note);
-    let size = row.map_or_else(
-        || "—".to_string(),
-        |row| {
-            if row.size == 0 {
-                "—".to_string()
-            } else {
-                fmt::bytes(row.size)
-            }
-        },
-    );
-
-    div()
-        .w(px(320.0))
-        .h_full()
-        .flex()
-        .flex_col()
-        .p_5()
-        .gap_4()
-        .bg(background)
-        .border_l_1()
-        .border_color(border)
-        .child(
-            div()
-                .text_size(px(11.0))
-                .text_color(muted)
-                .child("任务详情"),
-        )
-        .child(
-            div()
-                .v_flex()
-                .gap_2()
-                .child(div().text_size(px(18.0)).child(title.to_string()))
-                .child(
-                    div()
-                        .self_start()
-                        .px_2()
-                        .py_1()
-                        .rounded(px(999.0))
-                        .bg(accent.opacity(0.12))
-                        .text_size(px(11.0))
-                        .text_color(accent)
-                        .child(status),
-                )
-                .child(div().text_size(px(12.0)).text_color(muted).child(note)),
-        )
-        .child(
-            div()
-                .v_flex()
-                .gap_2()
-                .child(detail_kv("大小", &size, foreground, muted))
-                .child(detail_kv(
-                    "类型",
-                    row.map_or("—", |row| {
-                        if row.kind == Kind::Torrent {
-                            "BitTorrent"
-                        } else {
-                            "HTTP 分段下载"
-                        }
-                    }),
-                    foreground,
-                    muted,
-                )),
-        )
-        .child(
-            Button::new("open-folder")
-                .ghost()
-                .label("打开下载目录")
-                .w_full()
-                .justify_start(),
-        )
-}
-
-fn detail_kv(label: &str, value: &str, foreground: Hsla, muted: Hsla) -> Div {
-    div()
-        .flex()
-        .justify_between()
-        .gap_3()
-        .child(
-            div()
-                .text_size(px(12.0))
-                .text_color(muted)
-                .child(label.to_string()),
-        )
-        .child(
-            div()
-                .text_size(px(12.0))
-                .text_color(foreground)
-                .child(value.to_string()),
-        )
-}
-
-fn status_color(status: Status, theme: &Theme) -> Hsla {
-    match status {
-        Status::Active | Status::Probing | Status::Queued => theme.info,
-        Status::Done | Status::Seeding => theme.success,
-        Status::Paused => theme.warning,
-        Status::Failed => theme.danger,
-    }
-}
-
 fn sample_rows() -> Vec<Row> {
     let mut rows = Vec::new();
     let mut push = |id, name: &str, status, size, downloaded, speed| {
@@ -1977,21 +4828,33 @@ fn sample_rows() -> Vec<Row> {
         row.downloaded = downloaded;
         row.speed = speed;
         row.connections = if status == Status::Active { 8 } else { 0 };
+        row.dest = Some(PathBuf::from(r"C:\Users\Evan\Downloads").join(name));
+        let now = Instant::now();
+        let samples = [
+            0.56, 0.80, 0.76, 0.95, 0.45, 0.88, 0.74, 0.62, 0.92, 0.70, 0.55, 0.86, 0.64, 0.78,
+            0.72, 0.90,
+        ];
+        for (index, ratio) in samples.into_iter().enumerate() {
+            row.speed_history.push_back((
+                now - Duration::from_millis((15 - index) as u64 * 450),
+                speed * ratio,
+            ));
+        }
         rows.push(row);
     };
     push(
         1,
         "debian-13.2.0-amd64-netinst.iso",
         Status::Active,
-        682_000_000,
-        421_236_736,
-        18_700_000.0,
+        682 * 1024 * 1024,
+        421 * 1024 * 1024,
+        18.7 * 1024.0 * 1024.0,
     );
     push(
         2,
         "openai-paper-collection.zip",
         Status::Queued,
-        128_000_000,
+        128 * 1024 * 1024,
         0,
         0.0,
     );
@@ -2019,65 +4882,129 @@ fn sample_rows() -> Vec<Row> {
         87_031_808,
         0.0,
     );
-    push(
-        6,
-        "debian-13.2.0-amd64-netinst.iso",
-        Status::Seeding,
-        682_000_000,
-        682_000_000,
-        0.0,
-    );
+    rows[4].error = Some("server returned HTTP 403".into());
     rows
 }
 
 pub fn run() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let demo = args.iter().any(|arg| arg == "--demo");
-    let initial_add = args
-        .iter()
-        .position(|arg| arg == "--add")
-        .and_then(|index| args.get(index + 1))
-        .cloned();
-    let initial_torrent = args
-        .iter()
-        .position(|arg| arg == "--torrent")
-        .and_then(|index| args.get(index + 1))
-        .map(std::path::PathBuf::from);
+    let screen = arg_value(&args, "--screen").unwrap_or_else(|| "main".into());
+    let add_state = arg_value(&args, "--add-state").unwrap_or_else(|| "empty".into());
+    let theme_override = arg_value(&args, "--theme").and_then(|value| match value.as_str() {
+        "light" => Some(AppThemeMode::Light),
+        "dark" => Some(AppThemeMode::Dark),
+        "system" => Some(AppThemeMode::System),
+        _ => None,
+    });
+    let empty_demo = args.iter().any(|arg| arg == "--empty");
+    let select_failed = args.iter().any(|arg| arg == "--select-failed");
+    let select_paused = args.iter().any(|arg| arg == "--select-paused");
+    let settings_error = args.iter().any(|arg| arg == "--settings-error");
+    let demo = args.iter().any(|arg| arg == "--demo") || screen != "main";
+    let initial_add = arg_value(&args, "--add");
+    let initial_torrent = arg_value(&args, "--torrent").map(PathBuf::from);
+    let explicit_size = arg_value(&args, "--size").and_then(|value| parse_size(&value));
 
-    application().with_assets(assets::Assets).run(move |cx| {
+    application().with_assets(assets::AllAssets).run(move |cx| {
         init(cx);
-        Theme::change(ThemeMode::Dark, None, cx);
-        let (mut width, mut height) = crate::platform::startup_size();
+        let (mut width, mut height) = explicit_size
+            .or_else(|| {
+                std::env::var("VOLANT_WINDOW_SIZE")
+                    .ok()
+                    .and_then(|value| parse_size(&value))
+            })
+            .unwrap_or_else(crate::platform::startup_size);
         if let Some(display) = cx.primary_display() {
-            // GPUI's display geometry and open_window bounds use the same units,
-            // so clamp here instead of mixing Win32 metrics with scaled layout.
             let available = display.visible_bounds().size;
-            width = width.min((available.width.as_f32() - 32.0).max(520.0));
-            height = height.min((available.height.as_f32() - 64.0).max(340.0));
+            width = width.min((available.width.as_f32() - 32.0).max(960.0));
+            height = height.min((available.height.as_f32() - 64.0).max(560.0));
         }
         let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(520.0), px(340.0))),
+            window_min_size: Some(size(px(960.0), px(560.0))),
             ..TitleBar::window_options()
         };
-        open_window(options, cx, |window, cx| {
+        let opened = open_window(options, cx, |window, cx| {
             window.set_window_title("Volant");
-            let view = cx.new(|cx| VolantShell::new(demo, window, cx));
-            if let Some(url) = initial_add.clone() {
-                view.update(cx, |this, cx| {
-                    this.queue_url(url);
-                    cx.notify();
-                });
-            }
-            if let Some(path) = initial_torrent.clone() {
-                view.update(cx, |this, cx| {
-                    this.queue_torrent_file(&path);
-                    cx.notify();
-                });
-            }
-            view
+            cx.new(|cx| VolantShell::new(demo, window, cx))
         })
         .expect("open Volant GPUI window");
+        let view = opened.1;
+        opened
+            .0
+            .update(cx, |_, window, cx| {
+                view.update(cx, |this, cx| {
+                if empty_demo {
+                    this.rows.clear();
+                    this.selected = None;
+                    this.filter = Filter::All;
+                }
+                if let Some(mode) = theme_override {
+                    this.settings.theme = mode;
+                    theme::apply(cx, theme::resolve_mode(mode, window));
+                }
+                if select_failed
+                    && let Some(row) = this.rows.iter().find(|row| row.status == Status::Failed)
+                {
+                    this.selected = Some(row.id);
+                }
+                if select_paused
+                    && let Some(row) = this.rows.iter().find(|row| row.status == Status::Paused)
+                {
+                    this.selected = Some(row.id);
+                }
+                match screen.as_str() {
+                    "settings" => {
+                        this.open_settings_dialog(window, cx);
+                        if settings_error
+                            && let Some(settings) = &this.settings_dialog
+                        {
+                            settings.update(cx, |settings, cx| {
+                                settings.seed_directory_error(window, cx)
+                            });
+                        }
+                    }
+                    "new" => {
+                        this.open_add_dialog(window, cx);
+                        if let Some(add) = &this.add_dialog {
+                            let url = if add_state == "empty" {
+                                ""
+                            } else {
+                                "https://cdnimage.debian.org/debian-cd/current/amd64/iso-cd/debian-13.2.0-amd64-netinst.iso"
+                            };
+                            add.update(cx, |add, cx| {
+                                add.seed_capture_state(&add_state, url, window, cx)
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+                cx.notify();
+                });
+            })
+            .expect("configure Volant window");
+        view.update(cx, |this, cx| {
+            if let Some(url) = initial_add.clone() {
+                this.queue_url(url);
+                cx.notify();
+            }
+            if let Some(path) = initial_torrent.clone() {
+                this.queue_torrent_file(&path);
+                cx.notify();
+            }
+        });
     });
+}
+
+fn arg_value(args: &[String], name: &str) -> Option<String> {
+    args.iter()
+        .position(|arg| arg == name)
+        .and_then(|index| args.get(index + 1))
+        .cloned()
+}
+
+fn parse_size(value: &str) -> Option<(f32, f32)> {
+    let (width, height) = value.split_once(['x', 'X'])?;
+    Some((width.parse().ok()?, height.parse().ok()?))
 }

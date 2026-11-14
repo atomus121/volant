@@ -34,7 +34,8 @@ Volant combines adaptive segmented HTTP downloads, host-aware connection limits,
 - Download engine is UI-framework independent.
 - Preserve the current behavior boundary between `control::Cmd` and `control::UiEvent`.
 - Do not introduce a second theme runtime alongside GPUI Kit.
-- Keep the app usable at the existing 520×340 minimum window size; main design viewport is 1440×900.
+- Keep the main queue readable at the 960×560 minimum window size; the default
+  window is 1180×760 and the canonical design viewport is 1440×900.
 - Support light and dark themes through semantic tokens.
 - Light theme must use white as the dominant surface and black/gray for hierarchy; color may carry semantic status only.
 - Do not invent upload, cloud-drive, video-download, remote-control, or account features.

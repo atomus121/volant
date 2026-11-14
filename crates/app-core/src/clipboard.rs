@@ -25,6 +25,7 @@ mod imp {
     pub struct Watch {
         stop: Arc<AtomicBool>,
         on: Arc<AtomicBool>,
+        ignore_next: Arc<AtomicBool>,
         thread: Option<JoinHandle<()>>,
     }
 
@@ -32,11 +33,12 @@ mod imp {
         /// `enabled` 随时可以通过 `set_enabled` 改，不用重启线程。
         pub fn start(notify: super::Notifier, enabled: bool) -> (Watch, Receiver<String>) {
             let (tx, rx) = std::sync::mpsc::channel();
-            let (stop, on) = (
+            let (stop, on, ignore_next) = (
                 Arc::new(AtomicBool::new(false)),
                 Arc::new(AtomicBool::new(enabled)),
+                Arc::new(AtomicBool::new(false)),
             );
-            let (t_stop, t_on) = (stop.clone(), on.clone());
+            let (t_stop, t_on, t_ignore_next) = (stop.clone(), on.clone(), ignore_next.clone());
             let thread = std::thread::Builder::new()
                 .name("volant-clip".into())
                 .spawn(move || {
@@ -54,6 +56,9 @@ mod imp {
                         if !t_on.load(Ordering::Relaxed) {
                             continue;
                         }
+                        if t_ignore_next.swap(false, Ordering::SeqCst) {
+                            continue;
+                        }
                         let text = match unsafe { read_text() } {
                             Some(t) => t,
                             None => continue,
@@ -69,6 +74,7 @@ mod imp {
                 Watch {
                     stop,
                     on,
+                    ignore_next,
                     thread: Some(thread),
                 },
                 rx,
@@ -77,6 +83,10 @@ mod imp {
 
         pub fn set_enabled(&self, enabled: bool) {
             self.on.store(enabled, Ordering::Relaxed);
+        }
+
+        pub fn ignore_next(&self) {
+            self.ignore_next.store(true, Ordering::SeqCst);
         }
     }
 
@@ -196,6 +206,8 @@ mod stub {
         }
 
         pub fn set_enabled(&self, _enabled: bool) {}
+
+        pub fn ignore_next(&self) {}
     }
 }
 

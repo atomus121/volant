@@ -1447,6 +1447,10 @@ impl App {
                     self.mark_dirty();
                     had_progress = true;
                 }
+                // The legacy egui shell predates the video UI. The GPUI shell owns
+                // video lookups; keep this build exhaustive without inventing a
+                // second, divergent video picker here.
+                UiEvent::VideoLookup { .. } => {}
                 UiEvent::Notice(msg) => self.toast(msg, true),
             }
         }

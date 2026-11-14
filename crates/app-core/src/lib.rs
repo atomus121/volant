@@ -13,3 +13,4 @@ pub mod log;
 pub mod model;
 pub mod native;
 pub mod notify;
+pub mod video;

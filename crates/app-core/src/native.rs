@@ -17,6 +17,19 @@ use crate::capture::{PIPE, read_frame, write_frame};
 /// 清单名，也是扩展里 `connectNative` 的参数。
 pub const HOST: &str = "com.volant.host";
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HostStatus {
+    pub host_exe_present: bool,
+    pub chromium_registered: bool,
+    pub firefox_registered: bool,
+}
+
+impl HostStatus {
+    pub fn installed(self) -> bool {
+        self.host_exe_present && (self.chromium_registered || self.firefox_registered)
+    }
+}
+
 /// 扩展 id 由 `extension/manifest.json` 的 `key` 固定死（见那个文件），所以这里能写常量。
 ///
 /// 算法：`sha256(base64decode(key))` 取前 16 字节，每个半字节（0–15）映射成 `a`–`p`。
@@ -35,13 +48,23 @@ const CHROMIUM_KEYS: [&str; 5] = [
     r"Software\Chromium\NativeMessagingHosts",
 ];
 
-/// `volant.exe --native-host` 走这条：读浏览器给的帧，转发给界面。
+/// `volant-host.exe` 走这条：读浏览器给的一帧，转发给界面，再把界面的一帧答复
+/// 原样交给浏览器。视频解析和画质选择需要这条双向通道；普通下载也由同一路径确认。
 pub fn run_host() -> i32 {
     let mut stdin = io::stdin().lock();
-    let mut relay = Relay::default();
-    while let Ok(frame) = read_frame(&mut stdin) {
-        relay.send(&frame);
-    }
+    let Ok(request) = read_frame(&mut stdin) else {
+        return 0;
+    };
+    let reply = relay_request(&request).unwrap_or_else(|error| {
+        serde_json::to_vec(&serde_json::json!({
+            "ok": false,
+            "why": "host-failed",
+            "error": error.to_string(),
+        }))
+        .unwrap_or_else(|_| br#"{"ok":false,"why":"host-failed"}"#.to_vec())
+    });
+    let mut stdout = io::stdout().lock();
+    let _ = write_frame(&mut stdout, &reply);
     0
 }
 
@@ -90,6 +113,44 @@ pub fn install() -> Result<Vec<String>, String> {
         out.extend(failed);
     }
     Ok(out)
+}
+
+/// Check the local files and per-user registry entries used by browsers.
+pub fn host_status() -> HostStatus {
+    let dir = manifest_dir();
+    let host_exe_present = sibling("volant-host").is_file();
+    #[cfg(windows)]
+    {
+        let chromium = CHROMIUM_KEYS
+            .iter()
+            .any(|key| reg_installed(&format!(r"HKCU\{key}\{HOST}")));
+        let firefox = reg_installed(&format!(
+            r"HKCU\Software\Mozilla\NativeMessagingHosts\{HOST}"
+        ));
+        let _ = dir;
+        HostStatus {
+            host_exe_present,
+            chromium_registered: chromium,
+            firefox_registered: firefox,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let chromium = dir.join(format!("{HOST}.json")).is_file();
+        HostStatus {
+            host_exe_present,
+            chromium_registered: chromium,
+            firefox_registered: false,
+        }
+    }
+}
+
+#[cfg(windows)]
+fn reg_installed(key: &str) -> bool {
+    Command::new("reg")
+        .args(["query", key, "/ve"])
+        .output()
+        .is_ok_and(|out| out.status.success())
 }
 
 fn manifest_dir() -> PathBuf {
@@ -167,25 +228,25 @@ fn reg_add(key: &str, manifest: &Path) -> Result<String, String> {
     }
 }
 
-#[derive(Default)]
-struct Relay {
-    sink: Option<File>,
-}
-
-impl Relay {
-    fn send(&mut self, frame: &[u8]) {
-        // 两次机会：现有连接断了（界面进程重启过），以及重新拉起之后再连一次。
-        for _ in 0..2 {
-            if self.sink.is_none() {
-                self.sink = connect_or_start();
-            }
-            let Some(sink) = &mut self.sink else { return };
-            if write_frame(sink, frame).is_ok() {
-                return;
-            }
-            self.sink = None;
+fn relay_request(request: &[u8]) -> io::Result<Vec<u8>> {
+    // Two chances: an existing app may be restarting, and the host may have
+    // started it on the first try but connected before its pipe was ready.
+    let mut last = None;
+    for _ in 0..2 {
+        let Some(mut sink) = connect_or_start() else {
+            last = Some(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "Volant is not running",
+            ));
+            continue;
+        };
+        if let Err(error) = write_frame(&mut sink, request) {
+            last = Some(error);
+            continue;
         }
+        return read_frame(&mut sink);
     }
+    Err(last.unwrap_or_else(|| io::Error::other("Volant did not answer")))
 }
 
 fn connect_or_start() -> Option<File> {
@@ -200,7 +261,11 @@ fn connect_or_start() -> Option<File> {
 fn try_connect(patience: Duration) -> Option<File> {
     let deadline = Instant::now() + patience;
     loop {
-        match std::fs::OpenOptions::new().write(true).open(PIPE) {
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(PIPE)
+        {
             Ok(f) => return Some(f),
             Err(_) if Instant::now() >= deadline => return None,
             Err(_) => std::thread::sleep(Duration::from_millis(20)),
@@ -262,6 +327,53 @@ pub fn pick_folder(title: &str) -> Option<PathBuf> {
 
 #[cfg(not(windows))]
 pub fn pick_folder(_title: &str) -> Option<PathBuf> {
+    None
+}
+
+/// Native torrent file picker used by the compact add dialog.
+#[cfg(windows)]
+pub fn pick_torrent_file(title: &str) -> Option<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows_sys::Win32::System::Com::{
+        COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx,
+    };
+    use windows_sys::Win32::UI::Controls::Dialogs::{
+        GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_HIDEREADONLY, OFN_PATHMUSTEXIST, OPENFILENAMEW,
+    };
+
+    unsafe {
+        let _ = CoInitializeEx(
+            std::ptr::null_mut(),
+            (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32,
+        );
+    }
+    let mut file = vec![0u16; 32_768];
+    let filter: Vec<u16> = "种子文件 (*.torrent)\0*.torrent\0所有文件 (*.*)\0*.*\0\0"
+        .encode_utf16()
+        .collect();
+    let title_wide: Vec<u16> = std::ffi::OsStr::new(title)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut dialog = OPENFILENAMEW {
+        lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
+        lpstrFilter: filter.as_ptr(),
+        lpstrFile: file.as_mut_ptr(),
+        nMaxFile: file.len() as u32,
+        lpstrTitle: title_wide.as_ptr(),
+        Flags: OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY,
+        ..unsafe { std::mem::zeroed() }
+    };
+    if unsafe { GetOpenFileNameW(&mut dialog) } == 0 {
+        return None;
+    }
+    let length = file.iter().position(|ch| *ch == 0).unwrap_or(file.len());
+    Some(PathBuf::from(OsString::from_wide(&file[..length])))
+}
+
+#[cfg(not(windows))]
+pub fn pick_torrent_file(_title: &str) -> Option<PathBuf> {
     None
 }
 

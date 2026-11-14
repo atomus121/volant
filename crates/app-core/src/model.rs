@@ -53,6 +53,7 @@ pub enum Kind {
     #[default]
     Http,
     Torrent,
+    Video,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -96,6 +97,10 @@ pub struct Row {
     pub uploaded: u64,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub info_hash: String,
+    /// A resolved video download. It keeps the page, browser identity, selector
+    /// and subtitle preference so Resume can run yt-dlp again after a restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video: Option<crate::video::VideoTask>,
 
     /// 下面几个是运行时算的瞬时值，不落盘。
     #[serde(skip)]
@@ -138,6 +143,7 @@ impl Row {
             only: None,
             uploaded: 0,
             info_hash: String::new(),
+            video: None,
             speed: 0.0,
             sample: None,
             speed_history: VecDeque::new(),
@@ -152,6 +158,24 @@ impl Row {
             kind: Kind::Torrent,
             ..Row::new(id, url)
         }
+    }
+
+    /// 一行由 yt-dlp 处理的视频任务。
+    pub fn video(id: u64, task: crate::video::VideoTask) -> Row {
+        let mut row = Row {
+            kind: Kind::Video,
+            name: task.title.clone(),
+            size: task.choice.size.unwrap_or(0),
+            headers: video_headers(&task.context),
+            video: Some(task),
+            ..Row::new(id, String::new())
+        };
+        row.url = row
+            .video
+            .as_ref()
+            .map(|task| display_video_url(task))
+            .unwrap_or_default();
+        row
     }
 
     /// 上传/下载比；还没下到东西时是 0。
@@ -260,6 +284,9 @@ impl Row {
     }
 
     fn done_note(&self) -> String {
+        if self.kind == Kind::Video {
+            return "视频 · yt-dlp".into();
+        }
         if self.kind != Kind::Torrent {
             return "HTTP 分段下载".into();
         }
@@ -281,6 +308,25 @@ impl Row {
     }
 }
 
+fn display_video_url(task: &crate::video::VideoTask) -> String {
+    if task.context.src.is_empty() {
+        task.context.page.clone()
+    } else {
+        task.context.src.clone()
+    }
+}
+
+fn video_headers(context: &crate::video::VideoContext) -> Vec<(String, String)> {
+    let mut headers = Vec::new();
+    if !context.referrer.is_empty() {
+        headers.push(("Referer".into(), context.referrer.clone()));
+    }
+    if !context.user_agent.is_empty() {
+        headers.push(("User-Agent".into(), context.user_agent.clone()));
+    }
+    headers
+}
+
 /// 外观：跟随系统 / 强制浅色 / 强制深色。
 ///
 /// PRD 功能 27 的裁决是「砍掉主题引擎（9 套 + TOML + 图标集），只做浅/深色跟随系统」，
@@ -292,6 +338,15 @@ pub enum ThemeMode {
     System,
     Light,
     Dark,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProxyMode {
+    Direct,
+    #[default]
+    System,
+    Manual,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -315,6 +370,12 @@ pub struct Settings {
     /// 外观；老配置文件里没有这个键，按「跟随系统」补。
     #[serde(default)]
     pub theme: ThemeMode,
+    /// HTTP proxy policy for newly started tasks.
+    #[serde(default)]
+    pub proxy_mode: ProxyMode,
+    /// Manual HTTP/HTTPS proxy address.
+    #[serde(default)]
+    pub proxy_url: String,
     /// 点击删除时先弹出确认；可在确认框里选“不再提示”。
     #[serde(default = "default_true")]
     pub confirm_delete: bool,
@@ -334,6 +395,8 @@ impl Default for Settings {
             seed: false,
             seed_ratio: 2.0,
             theme: ThemeMode::System,
+            proxy_mode: ProxyMode::System,
+            proxy_url: String::new(),
             confirm_delete: true,
             skip_add_dialog: false,
         }
@@ -387,6 +450,17 @@ pub fn is_magnet(s: &str) -> bool {
     s.len() > 7
         && s.get(..7)
             .is_some_and(|p| p.eq_ignore_ascii_case("magnet:"))
+}
+
+/// The settings UI accepts only complete HTTP(S) proxy URLs with a host.
+///
+/// Requiring a parsed host catches cases like `http://` that a prefix-only
+/// check would save even though the engine can never use them.
+pub fn is_valid_http_proxy(address: &str) -> bool {
+    volant_engine::Url::parse(address.trim()).is_ok_and(|url| {
+        matches!(url.scheme(), "http" | "https")
+            && url.host_str().is_some_and(|host| !host.is_empty())
+    })
 }
 
 /// 列表和 toast 只解释下一步；原始技术错误仍保留在 `Row::error` 与详情/日志里。
@@ -685,6 +759,15 @@ mod tests {
         assert!(is_magnet("MAGNET:?xt=urn:btih:abc"));
         assert!(!is_magnet("https://x/a.torrent"));
         assert!(!is_magnet("magnet:"));
+    }
+
+    #[test]
+    fn manual_proxy_requires_a_complete_http_or_https_host() {
+        assert!(is_valid_http_proxy("http://127.0.0.1:7890"));
+        assert!(is_valid_http_proxy(" https://proxy.example:8443 "));
+        assert!(!is_valid_http_proxy("http://"));
+        assert!(!is_valid_http_proxy("socks5://127.0.0.1:1080"));
+        assert!(!is_valid_http_proxy("proxy.example:8080"));
     }
 
     #[test]

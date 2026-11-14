@@ -8163,6 +8163,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "volant-app-core"
 version = "0.6.16"
 dependencies = [
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",
@@ -8177,6 +8178,7 @@ version = "0.6.16"
 dependencies = [
  "gpui-kit",
  "librqbit",
+ "serde_json",
  "tokio",
  "volant-app-core",
  "volant-torrent",

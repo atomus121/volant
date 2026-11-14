@@ -6,7 +6,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -16,9 +16,11 @@ use volant_engine::{Config, Download, Error, Handle, probe_with};
 use volant_torrent::Torrents;
 
 use crate::model::{
-    MAX_CONNECTIONS_PER_TASK, MAX_PARALLEL_DOWNLOADS, Settings, TorrentFile, writable_download_dir,
+    MAX_CONNECTIONS_PER_TASK, MAX_PARALLEL_DOWNLOADS, ProxyMode, Settings, TorrentFile,
+    writable_download_dir,
 };
 use crate::notify::Notifier;
+use crate::video::{self, VideoContext, VideoLookup, VideoTask};
 
 /// torrent 的来源。`.torrent` 传磁盘上的副本路径，控制器自己去读。
 #[derive(Clone, Debug)]
@@ -54,13 +56,30 @@ pub enum Cmd {
     SetLimit(usize),
     SetConnections(usize),
     SetRate(Option<u64>),
+    SetProxy {
+        mode: ProxyMode,
+        url: String,
+    },
     SetDir(PathBuf),
+    /// Resolve a page/stream with yt-dlp. `id` is the browser request id.
+    VideoLookup {
+        id: u64,
+        context: VideoContext,
+    },
+    /// Download one resolved video choice through the normal task lifecycle.
+    AddVideo {
+        id: u64,
+        task: VideoTask,
+        destination: PathBuf,
+    },
 
     /// 解析种子（`list_only`）：拿到文件名/大小/文件列表，等界面选完文件。
     InspectTorrent {
         id: u64,
         source: TorSource,
     },
+    /// Drop metadata held only for the add-download preview.
+    ForgetTorrentPreview(u64),
     /// 用户选定文件后真正开始下。`only` 为 `None` = 全部。
     StartTorrent {
         id: u64,
@@ -137,6 +156,10 @@ pub enum UiEvent {
         seeders: usize,
         finished: bool,
     },
+    VideoLookup {
+        id: u64,
+        result: Result<VideoLookup, String>,
+    },
     Paused {
         id: u64,
     },
@@ -152,14 +175,25 @@ const REMOVE: u8 = 2;
 
 struct Pending {
     id: u64,
-    url: String,
-    dest: Option<PathBuf>,
-    headers: Vec<(String, String)>,
+    source: PendingSource,
+}
+
+enum PendingSource {
+    Http {
+        url: String,
+        dest: Option<PathBuf>,
+        headers: Vec<(String, String)>,
+    },
+    Video {
+        task: VideoTask,
+        destination: PathBuf,
+    },
 }
 
 struct Running {
     intent: Arc<AtomicU8>,
     handle: Arc<Mutex<Option<Handle>>>,
+    video_cancel: Option<Arc<AtomicBool>>,
 }
 
 enum Msg {
@@ -312,7 +346,12 @@ impl Controller {
         emit: Sender<UiEvent>,
         msg: UnboundedSender<Msg>,
     ) -> Controller {
-        let client = match volant_engine::client() {
+        let proxy = match settings.proxy_mode {
+            ProxyMode::Direct => volant_engine::HttpProxy::Direct,
+            ProxyMode::System => volant_engine::HttpProxy::System,
+            ProxyMode::Manual => volant_engine::HttpProxy::Manual(settings.proxy_url.clone()),
+        };
+        let client = match volant_engine::client_with_proxy(proxy) {
             Ok(c) => Some(c),
             Err(e) => {
                 let _ = emit.send(UiEvent::Notice(format!("网络初始化失败：{e}")));
@@ -425,9 +464,11 @@ impl Controller {
             Cmd::Add { id, url, headers } => {
                 self.queue.push_back(Pending {
                     id,
-                    url,
-                    dest: None,
-                    headers,
+                    source: PendingSource::Http {
+                        url,
+                        dest: None,
+                        headers,
+                    },
                 });
                 self.pump();
             }
@@ -439,9 +480,32 @@ impl Controller {
             } => {
                 self.queue.push_back(Pending {
                     id,
-                    url,
-                    dest: Some(dest),
-                    headers,
+                    source: PendingSource::Http {
+                        url,
+                        dest: Some(dest),
+                        headers,
+                    },
+                });
+                self.pump();
+            }
+            Cmd::VideoLookup { id, context } => {
+                let emit = self.emit.clone();
+                let notify = self.notify.clone();
+                self.rt.spawn(async move {
+                    let result = video::lookup(id, &context).await;
+                    if emit.send(UiEvent::VideoLookup { id, result }).is_ok() {
+                        notify.notify();
+                    }
+                });
+            }
+            Cmd::AddVideo {
+                id,
+                task,
+                destination,
+            } => {
+                self.queue.push_back(Pending {
+                    id,
+                    source: PendingSource::Video { task, destination },
                 });
                 self.pump();
             }
@@ -472,6 +536,26 @@ impl Controller {
                 self.tor_send(TorCmd::SetConnections(self.settings.connections));
             }
             Cmd::SetRate(r) => self.settings.rate = r,
+            Cmd::SetProxy { mode, url } => {
+                let proxy = match mode {
+                    ProxyMode::Direct => volant_engine::HttpProxy::Direct,
+                    ProxyMode::System => volant_engine::HttpProxy::System,
+                    ProxyMode::Manual => volant_engine::HttpProxy::Manual(url.clone()),
+                };
+                match volant_engine::client_with_proxy(proxy) {
+                    Ok(client) => {
+                        self.client = Some(client);
+                        self.settings.proxy_mode = mode;
+                        self.settings.proxy_url = url;
+                    }
+                    Err(error) => {
+                        let _ = error;
+                        self.send(UiEvent::Notice(
+                            "代理地址无效，已保留之前的代理设置。".into(),
+                        ));
+                    }
+                }
+            }
             Cmd::SetDir(d) => {
                 let (dir, note) = writable_download_dir(&d, &self.fallback_dir);
                 if let Some(note) = note {
@@ -481,6 +565,7 @@ impl Controller {
                 self.tor_send(TorCmd::Dir(dir));
             }
             Cmd::InspectTorrent { id, source } => self.tor_send(TorCmd::Inspect { id, source }),
+            Cmd::ForgetTorrentPreview(id) => self.tor_send(TorCmd::Forget(id)),
             Cmd::StartTorrent { id, only } => self.tor_send(TorCmd::Start { id, only }),
             Cmd::PauseTorrent(id) => self.tor_send(TorCmd::Pause(id)),
             Cmd::RemoveTorrent { id, delete_files } => {
@@ -504,6 +589,9 @@ impl Controller {
         // 任务还在 probe 阶段时 handle 是 None——run_one 会在 probe 回来后自查意图。
         if let Some(h) = r.handle.lock().unwrap().as_ref() {
             h.cancel();
+        }
+        if let Some(cancel) = &r.video_cancel {
+            cancel.store(true, Ordering::SeqCst);
         }
         true
     }
@@ -529,6 +617,17 @@ impl Controller {
 
     fn pump(&mut self) {
         let Some(client) = self.client.clone() else {
+            while let Some(p) = self.queue.pop_front() {
+                if let PendingSource::Http { .. } = p.source {
+                    self.send(UiEvent::Failed {
+                        id: p.id,
+                        reason: "网络客户端未初始化".into(),
+                    });
+                } else {
+                    self.queue.push_front(p);
+                    break;
+                }
+            }
             return;
         };
         while !self.queue.is_empty() {
@@ -543,39 +642,58 @@ impl Controller {
     fn spawn(&mut self, client: volant_engine::Client, p: Pending) {
         let id = p.id;
         let intent = Arc::new(AtomicU8::new(IDLE));
-        let slot: Arc<Mutex<Option<Handle>>> = Arc::new(Mutex::new(None));
-        self.running.insert(
-            id,
-            Running {
-                intent: intent.clone(),
-                handle: slot.clone(),
-            },
-        );
-
         let emit = self.emit.clone();
         let msg = self.msg.clone();
         let notify = self.notify.clone();
         let settings = self.settings.clone();
         let hosts = self.hosts.clone();
         let fallback_dir = self.fallback_dir.clone();
-        self.rt.spawn(async move {
-            run_one(
-                client,
-                id,
-                p.url,
-                p.dest,
-                p.headers,
-                settings,
-                hosts,
-                fallback_dir,
-                intent,
-                slot,
-                emit,
-                notify,
-            )
-            .await;
-            let _ = msg.send(Msg::Finished(id));
-        });
+        match p.source {
+            PendingSource::Http { url, dest, headers } => {
+                let slot: Arc<Mutex<Option<Handle>>> = Arc::new(Mutex::new(None));
+                self.running.insert(
+                    id,
+                    Running {
+                        intent: intent.clone(),
+                        handle: slot.clone(),
+                        video_cancel: None,
+                    },
+                );
+                self.rt.spawn(async move {
+                    run_one(
+                        client,
+                        id,
+                        url,
+                        dest,
+                        headers,
+                        settings,
+                        hosts,
+                        fallback_dir,
+                        intent,
+                        slot,
+                        emit,
+                        notify,
+                    )
+                    .await;
+                    let _ = msg.send(Msg::Finished(id));
+                });
+            }
+            PendingSource::Video { task, destination } => {
+                let cancel = Arc::new(AtomicBool::new(false));
+                self.running.insert(
+                    id,
+                    Running {
+                        intent: intent.clone(),
+                        handle: Arc::new(Mutex::new(None)),
+                        video_cancel: Some(cancel.clone()),
+                    },
+                );
+                self.rt.spawn(async move {
+                    run_video(id, task, destination, intent, cancel, emit, notify).await;
+                    let _ = msg.send(Msg::Finished(id));
+                });
+            }
+        }
     }
 
     fn cancel_all(&mut self) {
@@ -583,6 +701,9 @@ impl Controller {
             r.intent.store(PAUSE, Ordering::SeqCst);
             if let Some(h) = r.handle.lock().unwrap().as_ref() {
                 h.cancel();
+            }
+            if let Some(cancel) = &r.video_cancel {
+                cancel.store(true, Ordering::SeqCst);
             }
         }
     }
@@ -740,12 +861,75 @@ async fn wait_for_cancel(intent: &AtomicU8) {
     }
 }
 
+async fn run_video(
+    id: u64,
+    task: VideoTask,
+    destination: PathBuf,
+    intent: Arc<AtomicU8>,
+    cancel: Arc<AtomicBool>,
+    emit: Sender<UiEvent>,
+    notify: Notifier,
+) {
+    let event_emit = emit.clone();
+    let event_notify = notify.clone();
+    let send = move |event: UiEvent| {
+        if event_emit.send(event).is_ok() {
+            event_notify.notify();
+        }
+    };
+    if intent.load(Ordering::SeqCst) != IDLE || cancel.load(Ordering::SeqCst) {
+        return;
+    }
+    let expected = video::expected_path(&task, &destination);
+    send(UiEvent::Started {
+        id,
+        dest: expected,
+        name: video::safe_stem(&task.title),
+        size: task.choice.size.unwrap_or(0),
+        resumed_from: 0,
+    });
+    let elapsed = std::time::Instant::now();
+    let progress_emit = emit.clone();
+    let progress_notify = notify.clone();
+    let result = video::download(&task, &destination, cancel.clone(), move |progress| {
+        if progress_emit
+            .send(UiEvent::Progress {
+                id,
+                downloaded: progress.downloaded,
+                total: progress.total,
+                connections: 1,
+                elapsed_ms: elapsed.elapsed().as_millis() as u64,
+            })
+            .is_ok()
+        {
+            progress_notify.notify();
+        }
+    })
+    .await;
+    if intent.load(Ordering::SeqCst) != IDLE || cancel.load(Ordering::SeqCst) {
+        return;
+    }
+    match result {
+        Ok(path) => {
+            let size = std::fs::metadata(&path).map_or(0, |meta| meta.len());
+            send(UiEvent::Done {
+                id,
+                path,
+                size,
+                elapsed_ms: elapsed.elapsed().as_millis() as u64,
+            });
+        }
+        Err(reason) => send(UiEvent::Failed { id, reason }),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // torrent 子系统
 // ---------------------------------------------------------------------------
 
 enum TorCmd {
     Inspect { id: u64, source: TorSource },
+    Forget(u64),
     Start { id: u64, only: Option<Vec<usize>> },
     Pause(u64),
     Remove { id: u64, delete_files: bool },
@@ -864,6 +1048,9 @@ async fn torrent_actor(
                     }
                     Err(e) => send(UiEvent::Failed { id, reason: e }),
                 }
+            }
+            TorCmd::Forget(id) => {
+                parked.remove(&id);
             }
             TorCmd::Start { id, only } => {
                 queued.push_back((id, only));
