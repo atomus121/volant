@@ -31,9 +31,11 @@ use volant_app_core::model::{
 use volant_app_core::notify::{Notifier, UiNotifier};
 use volant_app_core::video::{self, VideoContext, VideoLookup, VideoTask};
 
+use crate::platform::{TrayEvent, TrayIcon};
 use crate::theme::{self, VolantColors};
 
 const ERROR_COPY: &str = "无法读取这个链接。请检查链接是否有效，或确认服务器允许下载。";
+const VIDEO_LOOKUP_TTL: Duration = Duration::from_secs(10 * 60);
 const RATE_VALUES: [Option<u64>; 5] = [
     None,
     Some(1_048_576),
@@ -48,6 +50,12 @@ enum Filter {
     Active,
     Done,
     Failed,
+}
+
+enum VideoLookupSlot {
+    Pending,
+    Ready(Box<VideoLookup>, Instant),
+    Failed(String, Instant),
 }
 
 impl Filter {
@@ -730,15 +738,17 @@ enum SettingsCategory {
     Download,
     Connection,
     Proxy,
+    Video,
     Integration,
     Appearance,
 }
 
 impl SettingsCategory {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Download,
         Self::Connection,
         Self::Proxy,
+        Self::Video,
         Self::Integration,
         Self::Appearance,
     ];
@@ -748,6 +758,7 @@ impl SettingsCategory {
             Self::Download => "下载",
             Self::Connection => "连接",
             Self::Proxy => "代理",
+            Self::Video => "视频",
             Self::Integration => "集成",
             Self::Appearance => "外观",
         }
@@ -758,6 +769,7 @@ impl SettingsCategory {
             Self::Download => IconName::Download,
             Self::Connection => IconName::Network,
             Self::Proxy => IconName::Shield,
+            Self::Video => IconName::Play,
             Self::Integration => IconName::Link,
             Self::Appearance => IconName::Monitor,
         }
@@ -768,7 +780,8 @@ impl SettingsCategory {
             Self::Download => "控制新任务的并发数量与默认保存位置。",
             Self::Connection => "调整每个任务的连接数和总下载带宽。",
             Self::Proxy => "决定新任务如何通过系统网络或指定代理连接。",
-            Self::Integration => "管理浏览器捕获、删除确认和本机宿主连接。",
+            Self::Video => "准备视频解析与 MP4 合成组件，检查运行状态。",
+            Self::Integration => "管理浏览器捕获、托盘行为、开机启动和本机宿主。",
             Self::Appearance => "选择跟随系统，或固定浅色和深色外观。",
         }
     }
@@ -787,7 +800,11 @@ struct SettingsView {
     category: SettingsCategory,
     host_status: volant_app_core::native::HostStatus,
     host_notice: Option<String>,
+    dependencies: video::VideoDependencyStatus,
+    dependency_notice: Option<String>,
+    installing_dependencies: bool,
     save_error: Option<String>,
+    _dependency_task: Option<Task<()>>,
     _dir_subscription: Subscription,
     _proxy_subscription: Subscription,
     _limit_select_subscription: Subscription,
@@ -799,6 +816,7 @@ impl SettingsView {
     fn new(
         parent: WeakEntity<VolantShell>,
         settings: Settings,
+        category: SettingsCategory,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -906,10 +924,14 @@ impl SettingsView {
             rate_select,
             notice: None,
             proxy_notice: None,
-            category: SettingsCategory::Download,
+            category,
             host_status: volant_app_core::native::host_status(),
             host_notice: None,
+            dependencies: video::dependency_status(),
+            dependency_notice: None,
+            installing_dependencies: false,
             save_error: None,
+            _dependency_task: None,
             _dir_subscription,
             _proxy_subscription,
             _limit_select_subscription,
@@ -1062,6 +1084,66 @@ impl SettingsView {
         self.persist(None, cx);
     }
 
+    fn set_close_to_tray(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.settings.close_to_tray = enabled;
+        self.persist(None, cx);
+    }
+
+    fn set_launch_at_startup(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        match crate::platform::set_autostart(enabled) {
+            Ok(()) => {
+                self.settings.launch_at_startup = enabled;
+                self.dependency_notice = None;
+                self.persist(None, cx);
+            }
+            Err(error) => {
+                self.save_error = Some(error);
+                cx.notify();
+            }
+        }
+    }
+
+    fn install_video_dependencies(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.installing_dependencies {
+            return;
+        }
+        self.installing_dependencies = true;
+        self.dependency_notice =
+            Some("正在准备 yt-dlp 与 ffmpeg。首次下载约 105 MB，请保持网络连接…".into());
+        cx.notify();
+        self._dependency_task = Some(cx.spawn_in(window, async move |this, cx| {
+            let result = video::install_dependencies().await;
+            let _ = this.update(cx, |this, cx| {
+                this.installing_dependencies = false;
+                match result {
+                    Ok(status) => {
+                        this.dependencies = status.clone();
+                        if let Some(parent) = this.parent.upgrade() {
+                            parent.update(cx, move |parent, cx| {
+                                parent.video_dependencies = status;
+                                cx.notify();
+                            });
+                        }
+                        this.dependency_notice =
+                            Some("视频组件已就绪，可以解析并合成 MP4。".into());
+                    }
+                    Err(error) => {
+                        let status = video::dependency_status();
+                        this.dependencies = status.clone();
+                        if let Some(parent) = this.parent.upgrade() {
+                            parent.update(cx, move |parent, cx| {
+                                parent.video_dependencies = status;
+                                cx.notify();
+                            });
+                        }
+                        this.dependency_notice = Some(format!("组件安装失败：{error}"));
+                    }
+                }
+                cx.notify();
+            });
+        }));
+    }
+
     fn seed_directory_error(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let path = r"Z:\Blocked\Downloads";
         self.dir_input.update(cx, |input, cx| {
@@ -1211,6 +1293,18 @@ impl Render for SettingsView {
             .color(colors.primary)
             .on_change(cx.listener(|this, checked, _, cx| this.set_confirm_delete(*checked, cx)))
             .into_any_element();
+        let close_to_tray_control = Switch::new("settings-close-to-tray")
+            .checked(settings.close_to_tray)
+            .accessibility_label("关闭窗口后留在托盘")
+            .color(colors.primary)
+            .on_change(cx.listener(|this, checked, _, cx| this.set_close_to_tray(*checked, cx)))
+            .into_any_element();
+        let launch_at_startup_control = Switch::new("settings-launch-at-startup")
+            .checked(settings.launch_at_startup)
+            .accessibility_label("开机启动")
+            .color(colors.primary)
+            .on_change(cx.listener(|this, checked, _, cx| this.set_launch_at_startup(*checked, cx)))
+            .into_any_element();
         let theme_control = div()
             .w(px(180.0))
             .h(px(32.0))
@@ -1316,9 +1410,64 @@ impl Render for SettingsView {
                     .on_click(cx.listener(|this, _, _, cx| this.install_host(cx))),
             )
             .into_any_element();
+        let component_state = |ready: bool, label: &str| {
+            let text = if ready {
+                format!("{label} · 已就绪")
+            } else {
+                format!("{label} · 缺少")
+            };
+            status_inline_text(
+                &text,
+                if ready {
+                    colors.success
+                } else {
+                    colors.warning
+                },
+            )
+            .into_any_element()
+        };
+        let dependency_control = div()
+            .w(px(270.0))
+            .flex()
+            .items_center()
+            .justify_end()
+            .gap(px(8.0))
+            .child(
+                Button::new("prepare-video-components")
+                    .secondary()
+                    .border_1()
+                    .border_color(colors.border_strong)
+                    .label(if self.installing_dependencies {
+                        "正在下载…"
+                    } else if self.dependencies.ready {
+                        "重新检测"
+                    } else {
+                        "下载组件"
+                    })
+                    .disabled(self.installing_dependencies || !self.dependencies.can_install)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.install_video_dependencies(window, cx)
+                    })),
+            )
+            .child(
+                Button::new("open-video-components")
+                    .ghost()
+                    .icon(IconName::FolderOpen)
+                    .accessibility_label("打开视频组件目录")
+                    .tooltip("打开视频组件目录")
+                    .on_click({
+                        let dir = PathBuf::from(&self.dependencies.helper_dir);
+                        move |_, _, _| open_directory(&dir)
+                    }),
+            )
+            .into_any_element();
         let notice_for_page = self.notice.clone();
         let proxy_notice_for_page = self.proxy_notice.clone();
         let host_notice = self.host_notice.clone();
+        let dependency_notice = self.dependency_notice.clone();
+        let ytdlp_status = component_state(self.dependencies.ytdlp.ready, "yt-dlp");
+        let ffmpeg_status = component_state(self.dependencies.ffmpeg.ready, "ffmpeg");
+        let js_status = component_state(self.dependencies.js_runtime.ready, "JavaScript 运行时");
         let mut page_rows = Vec::new();
         match self.category {
             SettingsCategory::Download => {
@@ -1405,6 +1554,59 @@ impl Render for SettingsView {
                     );
                 }
             }
+            SettingsCategory::Video => {
+                page_rows.push(self.setting_group("视频组件", colors).into_any_element());
+                page_rows.push(
+                    setting_row(
+                        "yt-dlp",
+                        "负责解析视频页面、登录状态和可用画质。",
+                        ytdlp_status,
+                        colors,
+                    )
+                    .into_any_element(),
+                );
+                page_rows.push(
+                    setting_row(
+                        "ffmpeg",
+                        "负责合并分离的音视频流，并最终输出 MP4。",
+                        ffmpeg_status,
+                        colors,
+                    )
+                    .into_any_element(),
+                );
+                page_rows.push(
+                    setting_row(
+                        "JavaScript 运行时",
+                        "YouTube 等站点需要 Node、Deno、QuickJS 或 Bun。",
+                        js_status,
+                        colors,
+                    )
+                    .into_any_element(),
+                );
+                page_rows.push(
+                    setting_row(
+                        "安装与位置",
+                        "首次下载约 105 MB；也可使用系统 PATH 中已有的版本。",
+                        dependency_control,
+                        colors,
+                    )
+                    .into_any_element(),
+                );
+                if let Some(notice) = dependency_notice {
+                    page_rows.push(
+                        div()
+                            .py(px(7.0))
+                            .text_size(px(theme::text::META))
+                            .text_color(if self.dependencies.ready {
+                                colors.success
+                            } else {
+                                colors.muted
+                            })
+                            .child(notice)
+                            .into_any_element(),
+                    );
+                }
+            }
             SettingsCategory::Integration => {
                 page_rows.push(self.setting_group("浏览器捕获", colors).into_any_element());
                 page_rows.push(
@@ -1431,6 +1633,25 @@ impl Render for SettingsView {
                         "删除任务前确认",
                         "避免误删未完成的下载。",
                         confirm_delete_control,
+                        colors,
+                    )
+                    .into_any_element(),
+                );
+                page_rows.push(self.setting_group("窗口与启动", colors).into_any_element());
+                page_rows.push(
+                    setting_row(
+                        "关闭窗口后留在托盘",
+                        "关闭整个程序请使用托盘菜单中的“退出 Volant”。",
+                        close_to_tray_control,
+                        colors,
+                    )
+                    .into_any_element(),
+                );
+                page_rows.push(
+                    setting_row(
+                        "开机启动",
+                        "登录 Windows 后在托盘中静默启动，不主动弹窗。",
+                        launch_at_startup_control,
                         colors,
                     )
                     .into_any_element(),
@@ -1967,6 +2188,7 @@ struct VolantShell {
     selected: Option<u64>,
     detail_open: bool,
     settings: Settings,
+    video_dependencies: video::VideoDependencyStatus,
     store: Option<Store>,
     control: Option<Control>,
     _clip: Option<Watch>,
@@ -1981,16 +2203,27 @@ struct VolantShell {
     host_connected: bool,
     pending_file_deletes: HashMap<u64, PathBuf>,
     capture_replies: HashMap<u64, CaptureReply>,
-    video_lookups: HashMap<String, VideoLookup>,
+    video_lookups: HashMap<String, VideoLookupSlot>,
+    video_tokens: HashMap<u64, String>,
     detail_restore_width: Option<f32>,
     last_task_click: Option<(u64, Instant)>,
+    quitting: bool,
     focus_handle: FocusHandle,
     _events_task: Option<Task<()>>,
+    _tray: Option<TrayIcon>,
+    _tray_task: Option<Task<()>>,
     _appearance_subscription: Subscription,
 }
 
 impl VolantShell {
-    fn new(demo: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        demo: bool,
+        background: bool,
+        tray: Option<TrayIcon>,
+        tray_events: Option<tokio::sync::mpsc::UnboundedReceiver<TrayEvent>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let paths = Paths::resolve();
         volant_app_core::log::init(&paths.home);
         let store = Store::new(paths.state.clone());
@@ -2016,6 +2249,7 @@ impl VolantShell {
             );
             let events_task = cx.spawn_in(window, async move |this, cx| {
                 while wake_rx.recv().await.is_some() {
+                    volant_app_core::log::line("ui wake");
                     let mut batch = Vec::new();
                     while let Ok(event) = events.try_recv() {
                         batch.push(event);
@@ -2072,11 +2306,41 @@ impl VolantShell {
         let selected = None;
         let focus_handle = cx.focus_handle().tab_stop(true);
         focus_handle.focus(window, cx);
+        let mut video_dependencies = video::dependency_status();
+        if demo {
+            video_dependencies.ready = true;
+            video_dependencies.ytdlp.ready = true;
+            video_dependencies.ffmpeg.ready = true;
+            video_dependencies.js_runtime.ready = true;
+        }
         let _appearance_subscription = cx.observe_window_appearance(window, |this, window, cx| {
             if this.settings.theme == AppThemeMode::System {
                 theme::apply(cx, theme::resolve_mode(AppThemeMode::System, window));
                 cx.notify();
             }
+        });
+        if !demo {
+            let _ = crate::platform::set_autostart(saved.settings.launch_at_startup);
+        }
+        let tray_task = tray_events.map(|mut events| {
+            cx.spawn_in(window, async move |this, cx| {
+                while let Some(event) = events.recv().await {
+                    let updated = this.update_in(cx, |this, window, cx| match event {
+                        TrayEvent::Open => {
+                            crate::platform::show_window(window);
+                            cx.notify();
+                        }
+                        TrayEvent::Quit => {
+                            this.save_now();
+                            this.quitting = true;
+                            cx.quit();
+                        }
+                    });
+                    if updated.is_err() {
+                        break;
+                    }
+                }
+            })
         });
         Self {
             home: paths.home.display().to_string(),
@@ -2086,6 +2350,7 @@ impl VolantShell {
             selected,
             detail_open: false,
             settings: saved.settings,
+            video_dependencies,
             store: (!demo).then_some(store),
             control,
             _clip: clip,
@@ -2096,15 +2361,23 @@ impl VolantShell {
             next_id: saved.next_id,
             dirty: false,
             last_save: Instant::now(),
-            notice: dir_note,
+            notice: if background {
+                Some("Volant 正在系统托盘中运行".into())
+            } else {
+                dir_note
+            },
             host_connected: false,
             pending_file_deletes: HashMap::new(),
             capture_replies: HashMap::new(),
             video_lookups: HashMap::new(),
+            video_tokens: HashMap::new(),
             detail_restore_width: None,
             last_task_click: None,
+            quitting: false,
             focus_handle,
             _events_task: events_task,
+            _tray: tray,
+            _tray_task: tray_task,
             _appearance_subscription,
         }
     }
@@ -2165,7 +2438,7 @@ impl VolantShell {
         if let Some(control) = &self.control {
             control.send(Cmd::AddVideo {
                 id,
-                task,
+                task: Box::new(task),
                 destination,
             });
             self.notice = Some("视频已加入队列".into());
@@ -2248,6 +2521,9 @@ impl VolantShell {
         };
         let request_id = capture.request_id;
         let reply = capture.reply.clone();
+        if !matches!(action, "ping" | "rules") {
+            crate::platform::show_window(window);
+        }
         match action {
             "ping" | "rules" => {
                 if let Some(reply) = reply {
@@ -2256,6 +2532,7 @@ impl VolantShell {
                         "version": env!("CARGO_PKG_VERSION"),
                         "capture": true,
                         "videoLookup": true,
+                        "videoDependencies": video::dependency_status(),
                         "opened": true,
                     }));
                 }
@@ -2265,6 +2542,7 @@ impl VolantShell {
                 let Some(reply) = reply else {
                     return;
                 };
+                let token = video::lookup_token(request_id);
                 let context = VideoContext {
                     page: if capture.page.is_empty() {
                         capture.url.clone()
@@ -2274,28 +2552,61 @@ impl VolantShell {
                     src: capture.src.clone(),
                     title: capture.title.clone(),
                     referrer: capture.referer.clone(),
+                    origin: capture.origin.clone(),
                     user_agent: capture.user_agent.clone(),
                     cookies: capture.cookies.clone(),
                 };
-                self.capture_replies.insert(request_id, reply);
+                self.video_lookups.retain(|_, slot| match slot {
+                    VideoLookupSlot::Pending => true,
+                    VideoLookupSlot::Ready(_, at) | VideoLookupSlot::Failed(_, at) => {
+                        at.elapsed() < VIDEO_LOOKUP_TTL
+                    }
+                });
+                if self.video_lookups.len() >= 24
+                    && let Some(oldest) = self
+                        .video_lookups
+                        .iter()
+                        .min_by_key(|(_, slot)| match slot {
+                            VideoLookupSlot::Pending => Instant::now(),
+                            VideoLookupSlot::Ready(_, at) | VideoLookupSlot::Failed(_, at) => *at,
+                        })
+                        .map(|(token, _)| token.clone())
+                {
+                    self.video_lookups.remove(&oldest);
+                }
+                self.video_lookups
+                    .insert(token.clone(), VideoLookupSlot::Pending);
+                self.video_tokens.insert(request_id, token.clone());
                 if let Some(control) = &self.control {
+                    let _ = reply.send(&serde_json::json!({
+                        "ok": true,
+                        "lookup": {"state": "pending", "token": token}
+                    }));
                     control.send(Cmd::VideoLookup {
                         id: request_id,
+                        token,
                         context,
                     });
                 } else {
-                    self.reply_capture(
-                        request_id,
-                        serde_json::json!({"ok": false, "error": "桌面端未启动"}),
-                    );
+                    self.video_lookups.remove(&token);
+                    self.video_tokens.remove(&request_id);
+                    let _ = reply.send(&serde_json::json!({"ok": false, "error": "桌面端未启动"}));
                 }
                 return;
             }
             "videoPoll" => {
-                let lookup = self.video_lookups.get(&capture.token).map_or_else(
-                    || serde_json::json!({"state": "pending"}),
-                    |lookup| serde_json::to_value(lookup).unwrap_or_default(),
-                );
+                let lookup = match self.video_lookups.get(&capture.token) {
+                    Some(VideoLookupSlot::Pending) => {
+                        serde_json::json!({"state": "pending", "token": capture.token})
+                    }
+                    Some(VideoLookupSlot::Ready(lookup, at)) if at.elapsed() < VIDEO_LOOKUP_TTL => {
+                        serde_json::to_value(lookup.as_ref()).unwrap_or_default()
+                    }
+                    Some(VideoLookupSlot::Failed(error, at)) if at.elapsed() < VIDEO_LOOKUP_TTL => {
+                        serde_json::json!({"state": "failed", "error": error})
+                    }
+                    _ => serde_json::json!({"state": "gone"}),
+                };
                 self.reply_capture(
                     request_id,
                     serde_json::json!({"ok": true, "lookup": lookup}),
@@ -2303,18 +2614,40 @@ impl VolantShell {
                 return;
             }
             "videoPick" => {
-                let Some(lookup) = self.video_lookups.get(&capture.token).cloned() else {
-                    self.reply_capture(
-                        request_id,
-                        serde_json::json!({
-                            "ok": false,
-                            "lookup": {"state": "gone"},
-                            "error": "画质信息已过期，请重新解析"
-                        }),
-                    );
-                    return;
+                let lookup = match self.video_lookups.remove(&capture.token) {
+                    Some(VideoLookupSlot::Ready(lookup, _)) => lookup,
+                    Some(VideoLookupSlot::Pending) => {
+                        self.video_lookups
+                            .insert(capture.token.clone(), VideoLookupSlot::Pending);
+                        self.reply_capture(
+                            request_id,
+                            serde_json::json!({
+                                "ok": false,
+                                "lookup": {"state": "pending", "token": capture.token}
+                            }),
+                        );
+                        return;
+                    }
+                    other => {
+                        if let Some(other) = other {
+                            self.video_lookups.insert(capture.token.clone(), other);
+                        }
+                        self.reply_capture(
+                            request_id,
+                            serde_json::json!({
+                                "ok": false,
+                                "lookup": {"state": "gone"},
+                                "error": "画质信息已过期，请重新解析"
+                            }),
+                        );
+                        return;
+                    }
                 };
                 let Some(choice) = lookup.choices.get(capture.choice).cloned() else {
+                    self.video_lookups.insert(
+                        capture.token.clone(),
+                        VideoLookupSlot::Ready(lookup, Instant::now()),
+                    );
                     self.reply_capture(
                         request_id,
                         serde_json::json!({
@@ -2356,7 +2689,13 @@ impl VolantShell {
                 return;
             }
             "open" => {
-                window.activate_window();
+                crate::platform::show_window(window);
+                self.reply_capture(request_id, serde_json::json!({"ok": true}));
+                return;
+            }
+            "openVideoSettings" => {
+                crate::platform::show_window(window);
+                self.open_settings_category(SettingsCategory::Video, window, cx);
                 self.reply_capture(request_id, serde_json::json!({"ok": true}));
                 return;
             }
@@ -2456,8 +2795,18 @@ impl VolantShell {
     }
 
     fn open_settings_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_settings_category(SettingsCategory::Download, window, cx);
+    }
+
+    fn open_settings_category(
+        &mut self,
+        category: SettingsCategory,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let parent = cx.weak_entity();
-        let view = cx.new(|cx| SettingsView::new(parent, self.settings.clone(), window, cx));
+        let view =
+            cx.new(|cx| SettingsView::new(parent, self.settings.clone(), category, window, cx));
         self.settings_dialog = Some(view.clone());
         let colors = theme::current(cx);
         window.open_dialog(cx, move |dialog, _, _| {
@@ -2630,7 +2979,7 @@ impl VolantShell {
             if let Some(task) = row.video.clone() {
                 control.send(Cmd::AddVideo {
                     id,
-                    task,
+                    task: Box::new(task),
                     destination: row
                         .dest
                         .as_deref()
@@ -2772,7 +3121,7 @@ impl VolantShell {
                         if let Some(task) = row.video.clone() {
                             control.send(Cmd::AddVideo {
                                 id,
-                                task,
+                                task: Box::new(task),
                                 destination: dest
                                     .parent()
                                     .map(Path::to_path_buf)
@@ -2796,7 +3145,7 @@ impl VolantShell {
                     if let Some(task) = row.video.clone() {
                         control.send(Cmd::AddVideo {
                             id,
-                            task,
+                            task: Box::new(task),
                             destination: self.settings.dir.clone(),
                         });
                     }
@@ -3013,14 +3362,20 @@ impl VolantShell {
                 }
                 self.mark_dirty();
             }
-            UiEvent::VideoLookup { id, result } => match result {
+            UiEvent::VideoLookup { id, result } => match *result {
                 Ok(lookup) => {
-                    let payload = serde_json::to_value(&lookup).unwrap_or_default();
-                    self.video_lookups.insert(lookup.token.clone(), lookup);
-                    self.reply_capture(id, serde_json::json!({"ok": true, "lookup": payload}));
+                    let token = lookup.token.clone();
+                    self.video_tokens.remove(&id);
+                    self.video_lookups.insert(
+                        token,
+                        VideoLookupSlot::Ready(Box::new(lookup), Instant::now()),
+                    );
                 }
                 Err(reason) => {
-                    self.reply_capture(id, serde_json::json!({"ok": false, "error": reason}));
+                    if let Some(token) = self.video_tokens.remove(&id) {
+                        self.video_lookups
+                            .insert(token, VideoLookupSlot::Failed(reason, Instant::now()));
+                    }
                 }
             },
             UiEvent::Notice(message) => {
@@ -4321,6 +4676,51 @@ impl Render for VolantShell {
                         })),
                 )
         });
+        let video_setup = (!self.video_dependencies.ready).then(|| {
+            div()
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .px(px(12.0))
+                .py(px(8.0))
+                .rounded(px(7.0))
+                .border_1()
+                .border_color(colors.warning.opacity(0.35))
+                .bg(colors.warning.opacity(0.08))
+                .child(
+                    Icon::new(IconName::Play)
+                        .with_size(Size::Size(px(14.0)))
+                        .text_color(colors.warning),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .v_flex()
+                        .gap(px(1.0))
+                        .child(
+                            div()
+                                .text_size(px(theme::text::BODY))
+                                .font_weight(FontWeight(590.0))
+                                .child("视频组件尚未准备"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(theme::text::META))
+                                .text_color(colors.muted)
+                                .child("yt-dlp 负责解析，ffmpeg 负责合成 MP4。"),
+                        ),
+                )
+                .child(
+                    Button::new("main-prepare-video")
+                        .secondary()
+                        .compact()
+                        .label("去准备")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_settings_category(SettingsCategory::Video, window, cx);
+                        })),
+                )
+        });
 
         div()
             .v_flex()
@@ -4469,6 +4869,7 @@ impl Render for VolantShell {
                                                     )),
                                             ),
                                     )
+                                    .when_some(video_setup, |this, setup| this.child(setup))
                                     .child(speed_band)
                                     .child(
                                         div()
@@ -4886,7 +5287,7 @@ fn sample_rows() -> Vec<Row> {
     rows
 }
 
-pub fn run() {
+pub fn run(requested_background: bool) {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let screen = arg_value(&args, "--screen").unwrap_or_else(|| "main".into());
     let add_state = arg_value(&args, "--add-state").unwrap_or_else(|| "empty".into());
@@ -4904,8 +5305,20 @@ pub fn run() {
     let initial_add = arg_value(&args, "--add");
     let initial_torrent = arg_value(&args, "--torrent").map(PathBuf::from);
     let explicit_size = arg_value(&args, "--size").and_then(|value| parse_size(&value));
+    let requested_background = requested_background || args.iter().any(|arg| arg == "--background");
+    let (tray, tray_events) = if demo {
+        (None, None)
+    } else if let Some((tray, events)) = TrayIcon::start() {
+        (Some(tray), Some(events))
+    } else {
+        (None, None)
+    };
+    let background = requested_background && tray.is_some();
 
-    application().with_assets(assets::AllAssets).run(move |cx| {
+    application()
+        .with_quit_mode(QuitMode::Explicit)
+        .with_assets(assets::AllAssets)
+        .run(move |cx| {
         init(cx);
         let (mut width, mut height) = explicit_size
             .or_else(|| {
@@ -4923,17 +5336,40 @@ pub fn run() {
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(960.0), px(560.0))),
+            show: !background,
+            focus: !background,
             ..TitleBar::window_options()
         };
         let opened = open_window(options, cx, |window, cx| {
             window.set_window_title("Volant");
-            cx.new(|cx| VolantShell::new(demo, window, cx))
+            cx.new(|cx| VolantShell::new(demo, background, tray, tray_events, window, cx))
         })
         .expect("open Volant GPUI window");
         let view = opened.1;
         opened
             .0
             .update(cx, |_, window, cx| {
+                let close_view = view.clone();
+                window.on_window_should_close(cx, move |window, cx| {
+                    let (quitting, stay) = {
+                        let state = close_view.read(cx);
+                        (
+                            state.quitting,
+                            state.settings.close_to_tray && state._tray.is_some(),
+                        )
+                    };
+                    if quitting {
+                        return true;
+                    }
+                    if stay {
+                        crate::platform::hide_window(window);
+                        false
+                    } else {
+                        close_view.update(cx, |this, _| this.quitting = true);
+                        cx.quit();
+                        true
+                    }
+                });
                 view.update(cx, |this, cx| {
                 if empty_demo {
                     this.rows.clear();
@@ -4994,7 +5430,7 @@ pub fn run() {
                 cx.notify();
             }
         });
-    });
+        });
 }
 
 fn arg_value(args: &[String], name: &str) -> Option<String> {

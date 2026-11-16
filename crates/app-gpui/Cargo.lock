@@ -7929,6 +7929,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "typed-path"
+version = "0.12.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54ec2755506471f54baf5e4bb5499d8e510cc1caf271270e778a736bd2d7336c"
+
+[[package]]
 name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8161,7 +8167,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "volant-app-core"
-version = "0.6.16"
+version = "0.6.21"
 dependencies = [
  "reqwest",
  "serde",
@@ -8170,14 +8176,16 @@ dependencies = [
  "volant-engine",
  "volant-torrent",
  "windows-sys 0.61.2",
+ "zip",
 ]
 
 [[package]]
 name = "volant-app-gpui"
-version = "0.6.16"
+version = "0.6.21"
 dependencies = [
  "gpui-kit",
  "librqbit",
+ "raw-window-handle",
  "serde_json",
  "tokio",
  "volant-app-core",
@@ -8187,7 +8195,7 @@ dependencies = [
 
 [[package]]
 name = "volant-engine"
-version = "0.6.16"
+version = "0.6.21"
 dependencies = [
  "fs2",
  "percent-encoding",
@@ -8200,7 +8208,7 @@ dependencies = [
 
 [[package]]
 name = "volant-torrent"
-version = "0.6.16"
+version = "0.6.21"
 dependencies = [
  "librqbit",
  "tokio",
@@ -9828,6 +9836,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.10",
+]
+
+[[package]]
+name = "zip"
+version = "8.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
+dependencies = [
+ "crc32fast",
+ "flate2",
+ "indexmap 2.14.2",
+ "memchr",
+ "typed-path",
 ]
 
 [[package]]

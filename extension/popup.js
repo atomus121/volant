@@ -9,6 +9,10 @@ const mediaSummary = $("media-summary");
 const feedback = $("media-feedback");
 const capture = $("capture");
 const subtitles = $("subtitles");
+const components = $("components");
+const ytdlpState = $("ytdlp-state");
+const ffmpegState = $("ffmpeg-state");
+const jsRuntimeState = $("js-runtime-state");
 
 let currentTab = null;
 let connection = { connected: false };
@@ -57,6 +61,30 @@ function renderStatus(state) {
   $("version").textContent = `v${ext.runtime.getManifest().version}`;
   $("open-app").disabled = !connection.connected;
   $("refresh").disabled = !currentTab;
+  renderComponents(connection.videoDependencies);
+}
+
+function componentLabel(component, readyText = "已就绪", missingText = "缺少") {
+  return component?.ready ? readyText : missingText;
+}
+
+function setComponent(element, component, readyText, missingText, optional = false) {
+  element.textContent = componentLabel(component, readyText, missingText);
+  element.dataset.bad = component?.ready || optional ? "0" : "1";
+}
+
+function renderComponents(dependencies) {
+  components.hidden = !connection.connected || !dependencies;
+  if (components.hidden) return;
+  setComponent(ytdlpState, dependencies.ytdlp, "已就绪", "需要下载");
+  setComponent(ffmpegState, dependencies.ffmpeg, "已就绪", "需要下载");
+  setComponent(
+    jsRuntimeState,
+    dependencies.jsRuntime,
+    "已发现",
+    "未发现（部分站点可用）",
+    true,
+  );
 }
 
 function renderMedia(items) {
@@ -147,6 +175,10 @@ $("refresh").addEventListener("click", refreshMedia);
 $("open-app").addEventListener("click", async () => {
   const reply = await ask({ type: "open" });
   if (!reply.ok) say(reply.error || "无法打开 Volant", true);
+});
+$("open-components").addEventListener("click", async () => {
+  const reply = await ask({ type: "openVideoSettings" });
+  if (!reply.ok) say(reply.error || "无法打开视频组件设置", true);
 });
 
 boot();

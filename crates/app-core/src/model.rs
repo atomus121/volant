@@ -173,7 +173,7 @@ impl Row {
         row.url = row
             .video
             .as_ref()
-            .map(|task| display_video_url(task))
+            .map(display_video_url)
             .unwrap_or_default();
         row
     }
@@ -321,6 +321,9 @@ fn video_headers(context: &crate::video::VideoContext) -> Vec<(String, String)> 
     if !context.referrer.is_empty() {
         headers.push(("Referer".into(), context.referrer.clone()));
     }
+    if !context.origin.is_empty() {
+        headers.push(("Origin".into(), context.origin.clone()));
+    }
     if !context.user_agent.is_empty() {
         headers.push(("User-Agent".into(), context.user_agent.clone()));
     }
@@ -382,6 +385,12 @@ pub struct Settings {
     /// 浏览器捕获和拖入种子时跳过“新建下载”确认，直接进入队列。
     #[serde(default)]
     pub skip_add_dialog: bool,
+    /// Keep Volant in the notification area when the window closes.
+    #[serde(default = "default_true")]
+    pub close_to_tray: bool,
+    /// Register the current executable under the per-user Run key.
+    #[serde(default)]
+    pub launch_at_startup: bool,
 }
 
 impl Default for Settings {
@@ -399,6 +408,8 @@ impl Default for Settings {
             proxy_url: String::new(),
             confirm_delete: true,
             skip_add_dialog: false,
+            close_to_tray: true,
+            launch_at_startup: false,
         }
     }
 }

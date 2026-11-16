@@ -10,7 +10,7 @@
     <main class="popup">
       <header class="header">
         <div class="brand">
-          <span class="mark" aria-hidden="true">V</span>
+          <img class="mark" src="icons/volant.svg" alt="" width="24" height="24" />
           <div>
             <h1>Volant</h1>
             <p>浏览器下载捕获</p>
@@ -27,18 +27,29 @@
         </span>
       </section>
 
-      <label class="capture-row">
-        <span>
-          <strong>捕获普通下载</strong>
-          <small>浏览器点击后交给 Volant</small>
-        </span>
-        <input id="capture" type="checkbox" role="switch" checked />
-      </label>
+      <section id="components" class="components" aria-label="视频组件状态" hidden>
+        <div class="components-head">
+          <strong>视频组件</strong>
+          <button id="open-components" type="button">在 Volant 中准备</button>
+        </div>
+        <div class="component-row">
+          <span>解析器</span>
+          <span id="ytdlp-state" class="component-state">未检测</span>
+        </div>
+        <div class="component-row">
+          <span>MP4 合成</span>
+          <span id="ffmpeg-state" class="component-state">未检测</span>
+        </div>
+        <div class="component-row">
+          <span>JavaScript 运行时</span>
+          <span id="js-runtime-state" class="component-state">未检测</span>
+        </div>
+      </section>
 
       <section class="media">
         <div class="section-head">
           <div>
-            <h2>页面媒体</h2>
+            <h2>当前页面</h2>
             <p id="media-summary">正在检查当前页面…</p>
           </div>
           <button id="refresh" class="icon-button" type="button" aria-label="刷新页面媒体" title="刷新">
@@ -50,11 +61,25 @@
           </button>
         </div>
         <div id="media-empty" class="empty">
-          播放视频后，这里会出现 HLS、DASH 或直接媒体文件。
+          播放视频后，这里会出现可下载的媒体；页面播放器上也会显示 Volant 按钮。
         </div>
         <ul id="media-list" aria-label="当前页面媒体"></ul>
         <p id="media-feedback" class="feedback" aria-live="polite" hidden></p>
       </section>
+
+      <div class="settings-block">
+        <div class="settings-title">
+          <span>浏览器接管</span>
+          <small>只影响普通下载</small>
+        </div>
+        <label class="capture-row">
+          <span>
+            <strong>捕获下载链接</strong>
+            <small>点击后交给 Volant，Cookie 与来源页一并保留</small>
+          </span>
+          <input id="capture" type="checkbox" role="switch" checked />
+        </label>
+      </div>
 
       <footer class="footer">
         <label class="subtitles">

@@ -14,6 +14,7 @@ let nextRequest = 1;
 let statusTitle = "正在连接 Volant";
 const passThrough = new Map();
 const mediaByTab = new Map();
+const sentWith = new Map();
 
 function showBadge(text) {
   ext.action
@@ -109,6 +110,7 @@ async function cookieJar(...urls) {
         path: cookie.path,
         secure: Boolean(cookie.secure),
         httpOnly: Boolean(cookie.httpOnly),
+        hostOnly: Boolean(cookie.hostOnly),
         expirationDate: cookie.expirationDate,
       });
     }
@@ -138,19 +140,27 @@ function fallbackTitle(url) {
   }
 }
 
-function videoContext(message, sender) {
+async function videoContext(message, sender) {
   const tab = sender?.tab || {};
   const page = web(message.url) ? message.url : pageOf(tab);
+  const src = web(message.src) ? message.src : bestTrackedSource(tab.id);
+  const sent = (mediaByTab.get(tab.id) || []).find((item) => item.url === src)?.sent || {};
   return {
     page,
-    src: web(message.src) ? message.src : bestTrackedSource(tab.id),
+    src,
     title: String(message.title || tab.title || fallbackTitle(page)).slice(0, 300),
-    referrer: web(message.referrer) ? message.referrer : pageOf(tab),
+    referrer: web(sent.referer)
+      ? sent.referer
+      : web(message.referrer)
+        ? message.referrer
+        : pageOf(tab),
+    origin: web(sent.origin) ? sent.origin : "",
+    cookies: await cookieJar(page, src),
   };
 }
 
 async function lookup(message, sender) {
-  const context = videoContext(message, sender);
+  const context = await videoContext(message, sender);
   if (!web(context.page) && !web(context.src)) {
     return { ok: false, error: "没有找到可下载的视频页面" };
   }
@@ -161,7 +171,8 @@ async function lookup(message, sender) {
     src: context.src,
     title: context.title,
     referer: context.referrer,
-    cookies: await cookieJar(context.page, context.src),
+    origin: context.origin,
+    cookies: context.cookies,
   });
 }
 
@@ -169,16 +180,30 @@ async function pick(message, sender) {
   if (!message.token || !Number.isInteger(message.choice) || message.choice < 0) {
     return { ok: false, error: "画质信息无效" };
   }
-  const page = pageOf(sender?.tab);
   return native({
     type: "videoPick",
-    url: page,
-    page,
     token: message.token,
     choice: message.choice,
     subtitles: Boolean(message.subtitles),
-    cookies: await cookieJar(page),
   });
+}
+
+async function poll(message) {
+  if (!message.token || typeof message.token !== "string") {
+    return { ok: true, lookup: { state: "gone" } };
+  }
+  return native({ type: "videoPoll", token: message.token });
+}
+
+async function awaitLookup(reply) {
+  let result = reply;
+  const token = result?.lookup?.token;
+  const deadline = Date.now() + REQUEST_TIMEOUT;
+  while (result?.lookup?.state === "pending" && token && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    result = await poll({ token });
+  }
+  return result;
 }
 
 function forgetMedia(tabId) {
@@ -230,6 +255,42 @@ function remember(tabId, url, kind, mime = "", extra = {}) {
 }
 
 const requestFilter = { urls: ["<all_urls>"] };
+const sentFilter = {
+  urls: ["<all_urls>"],
+  types: ["xmlhttprequest", "media", "other"],
+};
+function noteSent(details) {
+  if (details.tabId < 0) return;
+  const sent = {};
+  for (const header of details.requestHeaders || []) {
+    const name = String(header.name).toLowerCase();
+    if (
+      ["referer", "origin", "cookie"].includes(name) &&
+      typeof header.value === "string" &&
+      header.value
+    ) {
+      sent[name] = header.value;
+    }
+  }
+  sentWith.delete(details.requestId);
+  if (Object.keys(sent).length) sentWith.set(details.requestId, sent);
+  while (sentWith.size > 512) sentWith.delete(sentWith.keys().next().value);
+}
+try {
+  ext.webRequest.onBeforeSendHeaders.addListener(
+    noteSent,
+    sentFilter,
+    ["requestHeaders", "extraHeaders"],
+  );
+} catch {
+  try {
+    ext.webRequest.onBeforeSendHeaders.addListener(
+      noteSent,
+      sentFilter,
+      ["requestHeaders"],
+    );
+  } catch {}
+}
 ext.webRequest.onBeforeRequest.addListener(
   (details) => {
     const kind = mediaKind(details.url);
@@ -246,7 +307,9 @@ ext.webRequest.onHeadersReceived.addListener(
       (item) => item.name.toLowerCase() === "content-type",
     );
     const mime = String(header?.value || "").split(";")[0].trim().toLowerCase();
-    remember(details.tabId, details.url, kind, mime);
+    const sent = sentWith.get(details.requestId) || {};
+    sentWith.delete(details.requestId);
+    remember(details.tabId, details.url, kind, mime, { sent });
   },
   requestFilter,
   ["responseHeaders"],
@@ -321,6 +384,7 @@ async function state() {
     connected: true,
     app: reply.version || "",
     videoLookup: reply.videoLookup !== false,
+    videoDependencies: reply.videoDependencies || null,
   };
 }
 
@@ -329,14 +393,16 @@ async function mediaDownload(message, sender) {
   const item = (mediaByTab.get(tab.id) || []).find((entry) => entry.url === message.url);
   if (!item) return { ok: false, error: "这个媒体已经离开当前页面" };
   if (item.kind === "hls" || item.kind === "dash") {
-    const found = await lookup(
-      {
-        url: pageOf(tab),
-        src: item.url,
-        title: message.title || tab.title,
-        referrer: pageOf(tab),
-      },
-      sender,
+    const found = await awaitLookup(
+      await lookup(
+        {
+          url: pageOf(tab),
+          src: item.url,
+          title: message.title || tab.title,
+          referrer: pageOf(tab),
+        },
+        sender,
+      ),
     );
     if (!found.ok || !found.lookup?.choices?.length) {
       return { ok: false, error: found.error || "无法解析视频画质" };
@@ -360,6 +426,7 @@ async function mediaDownload(message, sender) {
     src: item.url,
     title: message.title || tab.title,
     referer: pageOf(tab),
+    origin: item.sent?.origin || "",
     cookie: await cookieHeader(item.url),
     user_agent: navigator.userAgent,
     mime: item.mime || "",
@@ -377,6 +444,8 @@ ext.runtime.onMessage.addListener((message, sender, respond) => {
         return state();
       case "video-lookup":
         return lookup(message, sender);
+      case "video-poll":
+        return poll(message);
       case "video-pick":
         return pick(message, sender);
       case "video":
@@ -387,6 +456,7 @@ ext.runtime.onMessage.addListener((message, sender, respond) => {
           src: message.src || "",
           title: message.title || sender.tab?.title,
           referer: pageOf(sender.tab),
+          origin: message.origin || "",
           cookie: await cookieHeader(message.src || pageOf(sender.tab)),
           user_agent: navigator.userAgent,
           t: Date.now(),
@@ -428,9 +498,11 @@ ext.contextMenus?.onClicked.addListener(async (info, tab) => {
   const url = info.srcUrl || info.linkUrl || "";
   const sender = { tab };
   const src = MANIFEST.test(url) || MEDIA_FILE.test(url) ? url : bestTrackedSource(tab.id);
-  const found = await lookup(
-    { url: info.pageUrl || tab.url, src, title: tab.title, referrer: info.pageUrl },
-    sender,
+  const found = await awaitLookup(
+    await lookup(
+      { url: info.pageUrl || tab.url, src, title: tab.title, referrer: info.pageUrl },
+      sender,
+    ),
   );
   if (!found.ok || !found.lookup?.choices?.length) {
     statusTitle = found.error || "无法解析视频";

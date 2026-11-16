@@ -17,8 +17,9 @@ use std::sync::{Arc, Mutex};
 
 use crate::notify::Notifier;
 
-/// 管道名。单用户桌面应用，固定名字就够；多用户同时开同一台机器才会撞。
-pub const PIPE: &str = r"\\.\pipe\volant-capture";
+/// Versioned so an orphaned pipe handle from an older app cannot capture the
+/// host's next request or make new connections wait forever.
+pub const PIPE: &str = r"\\.\pipe\volant-capture-v2";
 
 /// 单帧上限。Chrome 对 host→浏览器 的回复限 1 MB，我们对浏览器→host 也定成 1 MB。
 pub const MAX_FRAME: usize = 1 << 20;
@@ -35,6 +36,8 @@ pub struct Capture {
     pub request_id: u64,
     pub url: String,
     pub referer: String,
+    /// The Origin the page's player used for its stream request.
+    pub origin: String,
     pub cookie: String,
     pub user_agent: String,
     /// The video's own page, which may differ from the tab that embedded it.
@@ -66,6 +69,8 @@ pub struct BrowserCookie {
     pub secure: bool,
     #[serde(rename = "httpOnly")]
     pub http_only: bool,
+    #[serde(rename = "hostOnly")]
+    pub host_only: bool,
     #[serde(rename = "expirationDate")]
     pub expiration_date: Option<f64>,
 }
@@ -120,6 +125,7 @@ impl Capture {
         for (name, value) in [
             ("Cookie", &self.cookie),
             ("Referer", &self.referer),
+            ("Origin", &self.origin),
             ("User-Agent", &self.user_agent),
         ] {
             if !value.is_empty() {
@@ -202,8 +208,13 @@ mod imp {
                 | "media"
                 | "mediaDownload"
                 | "open"
+                | "openVideoSettings"
         );
-        if !known || (!web_target && !matches!(action, "ping" | "rules")) {
+        let targetless = matches!(
+            action,
+            "ping" | "rules" | "videoPoll" | "videoPick" | "open" | "openVideoSettings"
+        );
+        if !known || (!web_target && !targetless) {
             return None;
         }
         c.reply = Some(CaptureReply::new(c.request_id, output));
@@ -247,20 +258,29 @@ mod imp {
                             continue;
                         }
                         let mut conn = unsafe { File::from_raw_handle(handle as _) };
-                        // Native messaging is request/response now, but reading a
-                        // second frame keeps old one-way senders working.
-                        while let Ok(frame) = read_frame(&mut conn) {
-                            let writer = match conn.try_clone() {
-                                Ok(writer) => writer,
-                                Err(_) => break,
-                            };
-                            let Some(c) = parse(&frame, writer) else {
-                                continue;
-                            };
-                            if tx.send(c).is_ok() {
-                                notify.notify();
-                            }
-                        }
+                        let tx = tx.clone();
+                        let notify = notify.clone();
+                        // A browser or host can disappear while holding a pipe.
+                        // Serve each connection separately so it cannot block the
+                        // next popup or tab from reaching the app.
+                        std::thread::Builder::new()
+                            .name("volant-capture-conn".into())
+                            .spawn(move || {
+                                while let Ok(frame) = read_frame(&mut conn) {
+                                    let writer = match conn.try_clone() {
+                                        Ok(writer) => writer,
+                                        Err(_) => break,
+                                    };
+                                    let Some(c) = parse(&frame, writer) else {
+                                        continue;
+                                    };
+                                    crate::log::line(&format!("browser capture {}", c.action));
+                                    if tx.send(c).is_ok() {
+                                        notify.notify();
+                                    }
+                                }
+                            })
+                            .ok();
                     }
                 })
                 .expect("spawn capture thread");

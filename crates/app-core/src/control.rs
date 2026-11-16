@@ -64,12 +64,13 @@ pub enum Cmd {
     /// Resolve a page/stream with yt-dlp. `id` is the browser request id.
     VideoLookup {
         id: u64,
+        token: String,
         context: VideoContext,
     },
     /// Download one resolved video choice through the normal task lifecycle.
     AddVideo {
         id: u64,
-        task: VideoTask,
+        task: Box<VideoTask>,
         destination: PathBuf,
     },
 
@@ -158,7 +159,7 @@ pub enum UiEvent {
     },
     VideoLookup {
         id: u64,
-        result: Result<VideoLookup, String>,
+        result: Box<Result<VideoLookup, String>>,
     },
     Paused {
         id: u64,
@@ -185,7 +186,7 @@ enum PendingSource {
         headers: Vec<(String, String)>,
     },
     Video {
-        task: VideoTask,
+        task: Box<VideoTask>,
         destination: PathBuf,
     },
 }
@@ -403,18 +404,20 @@ impl Controller {
         self.tor = Some(tor_tx.clone());
         loop {
             enum In {
-                Cmd(Cmd),
+                Cmd(Box<Cmd>),
                 Msg(Msg),
             }
             // 两个通道都关了就退出：界面已经没了。
             let incoming = tokio::select! {
-                c = cmds.recv() => c.map(In::Cmd),
+                c = cmds.recv() => c.map(|cmd| In::Cmd(Box::new(cmd))),
                 m = msgs.recv() => m.map(In::Msg),
             };
             match incoming {
                 None => break,
-                Some(In::Cmd(Cmd::Shutdown)) => break,
-                Some(In::Cmd(cmd)) => self.on_cmd(cmd),
+                Some(In::Cmd(cmd)) => match *cmd {
+                    Cmd::Shutdown => break,
+                    cmd => self.on_cmd(cmd),
+                },
                 Some(In::Msg(Msg::Finished(id))) => self.on_finished(id),
                 Some(In::Msg(Msg::TorrentSlotAvailable)) => self.pump(),
             }
@@ -488,12 +491,18 @@ impl Controller {
                 });
                 self.pump();
             }
-            Cmd::VideoLookup { id, context } => {
+            Cmd::VideoLookup { id, token, context } => {
                 let emit = self.emit.clone();
                 let notify = self.notify.clone();
                 self.rt.spawn(async move {
-                    let result = video::lookup(id, &context).await;
-                    if emit.send(UiEvent::VideoLookup { id, result }).is_ok() {
+                    let result = video::lookup(token, &context).await;
+                    if emit
+                        .send(UiEvent::VideoLookup {
+                            id,
+                            result: Box::new(result),
+                        })
+                        .is_ok()
+                    {
                         notify.notify();
                     }
                 });
@@ -689,7 +698,18 @@ impl Controller {
                     },
                 );
                 self.rt.spawn(async move {
-                    run_video(id, task, destination, intent, cancel, emit, notify).await;
+                    run_video(
+                        id,
+                        *task,
+                        destination,
+                        settings.connections,
+                        settings.rate,
+                        intent,
+                        cancel,
+                        emit,
+                        notify,
+                    )
+                    .await;
                     let _ = msg.send(Msg::Finished(id));
                 });
             }
@@ -861,10 +881,13 @@ async fn wait_for_cancel(intent: &AtomicU8) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_video(
     id: u64,
     task: VideoTask,
     destination: PathBuf,
+    connections: usize,
+    rate: Option<u64>,
     intent: Arc<AtomicU8>,
     cancel: Arc<AtomicBool>,
     emit: Sender<UiEvent>,
@@ -891,20 +914,28 @@ async fn run_video(
     let elapsed = std::time::Instant::now();
     let progress_emit = emit.clone();
     let progress_notify = notify.clone();
-    let result = video::download(&task, &destination, cancel.clone(), move |progress| {
-        if progress_emit
-            .send(UiEvent::Progress {
-                id,
-                downloaded: progress.downloaded,
-                total: progress.total,
-                connections: 1,
-                elapsed_ms: elapsed.elapsed().as_millis() as u64,
-            })
-            .is_ok()
-        {
-            progress_notify.notify();
-        }
-    })
+    let result = video::download(
+        &task,
+        &destination,
+        id,
+        connections,
+        rate,
+        cancel.clone(),
+        move |progress| {
+            if progress_emit
+                .send(UiEvent::Progress {
+                    id,
+                    downloaded: progress.downloaded,
+                    total: progress.total,
+                    connections: progress.connections,
+                    elapsed_ms: elapsed.elapsed().as_millis() as u64,
+                })
+                .is_ok()
+            {
+                progress_notify.notify();
+            }
+        },
+    )
     .await;
     if intent.load(Ordering::SeqCst) != IDLE || cancel.load(Ordering::SeqCst) {
         return;

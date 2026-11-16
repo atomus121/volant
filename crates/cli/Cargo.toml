@@ -1,7 +1,7 @@
 [package]
 name = "volant-cli"
 description = "Volant 的命令行入口：不靠 UI 把文件下完"
-version = "0.6.16"
+version = "0.6.21"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

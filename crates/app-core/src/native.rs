@@ -9,7 +9,7 @@
 use std::fs::File;
 use std::io::{self};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::capture::{PIPE, read_frame, write_frame};
@@ -55,17 +55,40 @@ pub fn run_host() -> i32 {
     let Ok(request) = read_frame(&mut stdin) else {
         return 0;
     };
-    let reply = relay_request(&request).unwrap_or_else(|error| {
-        serde_json::to_vec(&serde_json::json!({
-            "ok": false,
-            "why": "host-failed",
-            "error": error.to_string(),
-        }))
-        .unwrap_or_else(|_| br#"{"ok":false,"why":"host-failed"}"#.to_vec())
-    });
+    let reply = local_reply(&request)
+        .or_else(|| relay_request(&request).ok())
+        .unwrap_or_else(|| {
+            serde_json::to_vec(&serde_json::json!({
+                "ok": false,
+                "why": "host-failed",
+                "error": "Volant is not running",
+            }))
+            .unwrap_or_else(|_| br#"{"ok":false,"why":"host-failed"}"#.to_vec())
+        });
     let mut stdout = io::stdout().lock();
     let _ = write_frame(&mut stdout, &reply);
     0
+}
+
+/// Popup status is a property of the installed host, not a reason to start the
+/// desktop process. Only an actual download, video lookup, or explicit open
+/// request needs the app.
+fn local_reply(request: &[u8]) -> Option<Vec<u8>> {
+    let request: serde_json::Value = serde_json::from_slice(request).ok()?;
+    let action = request.get("type").and_then(serde_json::Value::as_str)?;
+    if !matches!(action, "ping" | "rules") {
+        return None;
+    }
+    serde_json::to_vec(&serde_json::json!({
+        "ok": true,
+        "req": request.get("req").cloned().unwrap_or_default(),
+        "version": env!("CARGO_PKG_VERSION"),
+        "capture": true,
+        "videoLookup": true,
+        "videoDependencies": crate::video::dependency_status(),
+        "opened": false,
+    }))
+    .ok()
 }
 
 /// `volant.exe --install-host` 走这条：写清单、挂注册表，返回要给人看的几行。
@@ -255,7 +278,7 @@ fn connect_or_start() -> Option<File> {
     }
     // 界面进程没开：拉起来。用户点了下载就该看到窗口，比悄悄丢掉一条捕获好。
     let _ = start_app();
-    try_connect(Duration::from_millis(800))
+    try_connect(Duration::from_secs(15))
 }
 
 fn try_connect(patience: Duration) -> Option<File> {
@@ -275,7 +298,15 @@ fn try_connect(patience: Duration) -> Option<File> {
 
 fn start_app() -> io::Result<()> {
     // 别用 current_exe：这里跑的是 volant-host.exe，再起一次就是死循环。
-    Command::new(sibling("volant")).spawn().map(|_| ())
+    // A GUI app must not inherit the native-messaging pipes. Chrome owns the
+    // host's stdin/stdout, and a desktop process writing to that inherited
+    // stderr can block its UI thread before the capture pipe is ready.
+    Command::new(sibling("volant"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
 }
 
 /// Open the native folder picker used by settings.
@@ -431,6 +462,19 @@ mod tests {
         assert!(
             cmd.contains(r#"/d "C:\Apps\My App\com.volant.host.json""#),
             "{cmd}"
+        );
+    }
+
+    #[test]
+    fn popup_status_is_answered_without_starting_the_app() {
+        let reply = local_reply(br#"{"type":"rules","req":42}"#).unwrap();
+        let reply: serde_json::Value = serde_json::from_slice(&reply).unwrap();
+        assert_eq!(reply["ok"], true);
+        assert_eq!(reply["req"], 42);
+        assert_eq!(reply["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            local_reply(br#"{"type":"download","url":"https://example.com/a"}"#),
+            None
         );
     }
 }

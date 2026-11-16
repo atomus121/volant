@@ -12,8 +12,11 @@
   const ext = globalThis.browser ?? globalThis.chrome;
   const MIN_WIDTH = 200;
   const MIN_HEIGHT = 112;
-  const IDLE_MS = 1500;
+  const IDLE_MS = 2000;
+  const LOOKUP_TIMEOUT = 60_000;
+  const POLL_MS = 1200;
   const controls = new Set();
+  const dismissed = new WeakSet();
   let menuOpen = false;
   let savedSubtitles = false;
 
@@ -32,18 +35,18 @@
     :host { all: initial; }
     *, *::before, *::after { box-sizing: border-box; }
     .surface {
-      --paper: #fff;
-      --subtle: #f7f8fa;
-      --hover: #f2f4f6;
-      --sunken: #f3f5f7;
-      --ink: #111417;
-      --muted: #59626b;
-      --faint: #657079;
-      --rule: #e1e4e7;
-      --strong: #cdd3d8;
-      --current: #2f6bff;
-      --current-soft: #edf2ff;
-      --danger: #b3423d;
+      --paper: #15191f;
+      --subtle: #12161b;
+      --hover: #1b2128;
+      --sunken: #171c22;
+      --ink: #edf1f5;
+      --muted: #a2acb6;
+      --faint: #87929c;
+      --rule: #222830;
+      --strong: #34404c;
+      --current: #7299ff;
+      --current-soft: #202832;
+      --danger: #ff8078;
       position: fixed;
       z-index: 2147483647;
       display: flex;
@@ -52,30 +55,20 @@
       color: var(--ink);
       font: 400 11.5px/1.3 "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", sans-serif;
       pointer-events: none;
+      visibility: hidden;
       opacity: 0;
       transform: translateY(4px);
-      transition: opacity 140ms ease-out, transform 140ms ease-out;
-    }
-    @media (prefers-color-scheme: dark) {
-      .surface {
-        --paper: #15191f;
-        --subtle: #12161b;
-        --hover: #1b2128;
-        --sunken: #171c22;
-        --ink: #edf1f5;
-        --muted: #a2acb6;
-        --faint: #87929c;
-        --rule: #222830;
-        --strong: #34404c;
-        --current: #7299ff;
-        --current-soft: #202832;
-        --danger: #ff8078;
-      }
+      transition:
+        opacity 140ms ease-out,
+        transform 140ms ease-out,
+        visibility 0s linear 140ms;
     }
     .surface[data-show="1"] {
+      visibility: visible;
       opacity: 1;
       transform: translateY(0);
       pointer-events: auto;
+      transition-delay: 0s;
     }
     button {
       appearance: none;
@@ -118,8 +111,18 @@
       color: var(--muted);
     }
     .more:hover { background: var(--hover); color: var(--ink); }
-    .go:focus-visible, .more:focus-visible, .choice:focus-visible,
-    .retry:focus-visible, .check input:focus-visible {
+    .close {
+      display: grid;
+      place-items: center;
+      width: 29px;
+      border: 0;
+      border-left: 1px solid var(--rule);
+      background: transparent;
+      color: var(--faint);
+    }
+    .close:hover { background: var(--hover); color: var(--ink); }
+    .go:focus-visible, .more:focus-visible, .close:focus-visible, .choice:focus-visible,
+    .retry:focus-visible, .open-app:focus-visible, .check input:focus-visible {
       outline: 2px solid var(--current);
       outline-offset: -2px;
     }
@@ -132,15 +135,20 @@
       position: absolute;
       top: 37px;
       right: 0;
+      display: flex;
+      flex-direction: column;
       width: min(310px, calc(100vw - 24px));
+      max-height: calc(100vh - 48px);
       border: 1px solid var(--strong);
       border-radius: 10px;
       background: var(--paper);
       box-shadow: 0 18px 52px rgba(14, 19, 24, .18), 0 2px 8px rgba(14, 19, 24, .08);
       overflow: hidden;
     }
+    .surface[data-up="1"] .menu { top: auto; bottom: 37px; }
     .menu[hidden] { display: none; }
     .head {
+      flex: none;
       padding: 13px 14px 11px;
       border-bottom: 1px solid var(--rule);
     }
@@ -160,6 +168,7 @@
       font-size: 11px;
     }
     .list {
+      min-height: 0;
       max-height: 330px;
       overflow: auto;
       overscroll-behavior: contain;
@@ -213,6 +222,7 @@
     }
     @keyframes breathe { to { opacity: .48; } }
     .foot {
+      flex: none;
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -230,6 +240,7 @@
       user-select: none;
     }
     .check input { width: 14px; height: 14px; margin: 0; accent-color: var(--current); }
+    .foot-actions { display: flex; align-items: center; gap: 5px; }
     .retry {
       min-height: 28px;
       padding: 0 8px;
@@ -240,6 +251,16 @@
       font-weight: 560;
     }
     .retry:hover { background: var(--current-soft); }
+    .open-app {
+      min-height: 28px;
+      padding: 0 9px;
+      border: 1px solid var(--strong);
+      border-radius: 5px;
+      background: var(--paper);
+      color: var(--ink);
+      font-weight: 560;
+    }
+    .open-app:hover { background: var(--hover); }
     .error {
       padding: 14px;
       color: var(--danger);
@@ -269,6 +290,12 @@
             stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
       </button>
+      <button class="close" type="button" aria-label="在此视频上隐藏下载按钮" title="在此视频上隐藏">
+        <svg class="icon" viewBox="0 0 16 16" aria-hidden="true">
+          <path d="m4.5 4.5 7 7m0-7-7 7" fill="none" stroke="currentColor" stroke-width="1.35"
+            stroke-linecap="round"/>
+        </svg>
+      </button>
     </div>
     <section class="menu" role="dialog" aria-label="视频下载选项" hidden>
       <header class="head">
@@ -278,7 +305,10 @@
       <div class="list"><div class="skeleton"></div><div class="skeleton"></div></div>
       <footer class="foot">
         <label class="check"><input type="checkbox"> 同时保存字幕</label>
-        <button class="retry" type="button" hidden>重试</button>
+        <span class="foot-actions">
+          <button class="retry" type="button" hidden>重试</button>
+          <button class="open-app" type="button">打开 Volant</button>
+        </span>
       </footer>
     </section>
   `;
@@ -287,6 +317,7 @@
 
   const go = shadow.querySelector(".go");
   const more = shadow.querySelector(".more");
+  const close = shadow.querySelector(".close");
   const label = shadow.querySelector(".label");
   const menu = shadow.querySelector(".menu");
   const title = shadow.querySelector(".title");
@@ -294,6 +325,7 @@
   const list = shadow.querySelector(".list");
   const subtitles = shadow.querySelector(".check input");
   const retry = shadow.querySelector(".retry");
+  const openApp = shadow.querySelector(".open-app");
   subtitles.checked = savedSubtitles;
   subtitles.addEventListener("change", () => {
     savedSubtitles = subtitles.checked;
@@ -361,6 +393,15 @@
   function show() {
     if (!active) return;
     clearTimeout(hideTimer);
+    const protectedVideo = Boolean(active.mediaKeys);
+    go.disabled = protectedVideo;
+    more.disabled = protectedVideo;
+    if (protectedVideo) label.textContent = "受保护视频";
+    else if (lookup?.state === "ready") {
+      label.textContent =
+        lookup.choices?.find((choice) => !choice.audio && choice.height)?.label || "下载视频";
+    } else if (lookup?.state === "pending") label.textContent = "查找画质…";
+    else label.textContent = "下载视频";
     place();
     surface.dataset.show = "1";
     hideTimer = setTimeout(() => {
@@ -370,6 +411,9 @@
 
   function hide() {
     if (menuOpen) return;
+    if (shadow.activeElement && active?.isConnected) {
+      active.focus({ preventScroll: true });
+    }
     surface.dataset.show = "0";
   }
 
@@ -381,19 +425,24 @@
       return;
     }
     const right = Math.max(8, Math.min(innerWidth - 8, innerWidth - box.right + 10));
-    const bottom = Math.max(8, Math.min(innerHeight - 8, innerHeight - box.bottom + 10));
+    const top = Math.max(8, Math.min(innerHeight - 40, box.top + 10));
     surface.style.right = `${right}px`;
-    surface.style.bottom = `${bottom}px`;
-  }
-
-  function setBusy(busy, text = "下载视频") {
-    go.disabled = busy;
-    more.disabled = busy;
-    label.textContent = busy ? "正在解析…" : text;
+    surface.style.top = `${top}px`;
+    surface.style.bottom = "auto";
+    menu.style.removeProperty("max-height");
+    const opening = menuOpen && !menu.hidden;
+    const above = opening && top + 37 + menu.offsetHeight > innerHeight - 8;
+    surface.dataset.up = above ? "1" : "0";
+    if (opening) {
+      const available = Math.max(120, (above ? top : innerHeight - top) - 45);
+      menu.style.maxHeight = `${available}px`;
+    }
   }
 
   function setError(error) {
-    setBusy(false);
+    go.disabled = false;
+    more.disabled = false;
+    label.textContent = "下载视频";
     caption.textContent = error || "无法解析这个视频";
     list.replaceChildren();
     const box = document.createElement("div");
@@ -401,6 +450,22 @@
     box.textContent = error || "无法解析这个视频";
     list.append(box);
     retry.hidden = false;
+    place();
+  }
+
+  function setPending() {
+    go.disabled = false;
+    more.disabled = false;
+    label.textContent = "查找画质…";
+    caption.textContent = "正在读取可用格式…";
+    retry.hidden = true;
+    list.replaceChildren();
+    for (let i = 0; i < 3; i++) {
+      const row = document.createElement("div");
+      row.className = "skeleton";
+      list.append(row);
+    }
+    place();
   }
 
   function choiceRow(choice, group) {
@@ -409,29 +474,34 @@
     button.type = "button";
     button.dataset.index = String(choice.index);
     button.dataset.group = group;
-    button.setAttribute("role", "menuitem");
     const what = document.createElement("span");
     const name = document.createElement("span");
     name.className = "choice-name";
     name.textContent = choice.label;
     const meta = document.createElement("span");
     meta.className = "choice-meta";
-    meta.textContent = [choice.ext, choice.fps ? `${Math.round(choice.fps)} fps` : ""]
+    const ext = choice.ext && choice.ext !== "自动" ? choice.ext : "";
+    meta.textContent = [
+      ext,
+      choice.codec,
+      choice.range,
+      choice.fps ? `${Math.round(choice.fps)} fps` : "",
+      choice.kbps ? `${choice.kbps} kbps` : "",
+    ]
       .filter(Boolean)
       .join(" · ");
     what.append(name, meta);
     const size = document.createElement("span");
     size.className = "choice-size";
-    size.textContent = sizeText(choice.size);
+    size.textContent = `${choice.approx && choice.size ? "~" : ""}${sizeText(choice.size)}`;
     button.append(what, size);
     button.addEventListener("click", () => choose(choice));
     return button;
   }
 
-  function renderMenu(result) {
-    const data = result?.lookup;
+  function renderMenu(data) {
     if (!data?.choices?.length) {
-      setError(result?.error || "没有可下载的画质");
+      setError(data?.error || "没有可下载的画质");
       return;
     }
     title.textContent = data.title || document.title || "视频";
@@ -453,7 +523,8 @@
       for (const choice of choices) list.append(choiceRow(choice, name));
     }
     retry.hidden = true;
-    label.textContent = videos[0]?.label || "最佳画质";
+    label.textContent = videos.find((choice) => choice.height)?.label || "最佳画质";
+    place();
   }
 
   function clock(seconds) {
@@ -466,39 +537,71 @@
       : `${minutes}:${String(secs).padStart(2, "0")}`;
   }
 
+  let lookupPromise = null;
+
+  async function followLookup(first, key, video) {
+    let data = first;
+    const token = data?.token;
+    const deadline = Date.now() + LOOKUP_TIMEOUT;
+    while (data?.state === "pending" && token && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+      if (key !== lookupKey || !video.isConnected) return null;
+      const reply = await send({ type: "video-poll", token });
+      if (!reply?.ok) {
+        data = { state: "failed", error: reply?.error || "无法继续读取画质" };
+        break;
+      }
+      data = reply.lookup || { state: "gone" };
+    }
+    if (data?.state === "pending") {
+      data = { state: "failed", error: "读取画质超时，请重试。" };
+    }
+    lookup = data;
+    lookupKey = key;
+    if (active && `${pageFor(active)}\n${sourceFor(active)}` === key) {
+      if (data?.state === "ready" && data.choices?.length) renderMenu(data);
+      else setError(data?.error || "没有可下载的画质");
+    }
+    return data;
+  }
+
   async function resolve(force = false) {
     if (!active) return null;
-    const key = `${pageFor(active)}\n${sourceFor(active)}`;
-    if (!force && lookup && lookupKey === key) return lookup;
-    setBusy(true);
-    retry.hidden = true;
-    caption.textContent = "正在读取可用格式…";
-    list.replaceChildren();
-    for (let i = 0; i < 3; i++) {
-      const row = document.createElement("div");
-      row.className = "skeleton";
-      list.append(row);
+    const video = active;
+    const key = `${pageFor(video)}\n${sourceFor(video)}`;
+    if (!force && lookup && lookupKey === key) {
+      if (lookup.state === "ready") return lookup;
+      if (lookup.state !== "pending") return null;
     }
-    const reply = await send({
-      type: "video-lookup",
-      url: pageFor(active),
-      src: sourceFor(active),
-      title: document.title,
-      referrer: location.href,
+    if (!force && lookupPromise && lookupKey === key) return lookupPromise;
+    lookup = { state: "pending" };
+    lookupKey = key;
+    setPending();
+    lookupPromise = (async () => {
+      const reply = await send({
+        type: "video-lookup",
+        url: pageFor(video),
+        src: sourceFor(video),
+        title: document.title,
+        referrer: location.href,
+      });
+      if (!reply?.ok || !reply.lookup) {
+        lookup = { state: "failed", error: reply?.error || "无法解析这个视频" };
+        lookupKey = key;
+        if (active && `${pageFor(active)}\n${sourceFor(active)}` === key) {
+          setError(lookup.error);
+        }
+        return null;
+      }
+      return followLookup(reply.lookup, key, video);
+    })().finally(() => {
+      lookupPromise = null;
     });
-    setBusy(false);
-    if (reply?.ok && reply.lookup) {
-      lookup = reply.lookup;
-      lookupKey = key;
-      renderMenu(reply);
-      return reply;
-    }
-    setError(reply?.error || "无法解析这个视频");
-    return null;
+    return lookupPromise;
   }
 
   async function choose(choice) {
-    if (!lookup?.token || !choice) return;
+    if (!lookup?.token || lookup.state !== "ready" || !choice) return;
     more.disabled = true;
     go.disabled = true;
     caption.textContent = "正在加入下载队列…";
@@ -510,14 +613,11 @@
     });
     more.disabled = false;
     go.disabled = false;
-    if (reply?.ok) {
+    if (reply?.ok && reply.lookup?.state !== "failed") {
       caption.textContent = "已加入 Volant 下载队列";
       label.textContent = choice.label;
       setTimeout(() => {
-        menuOpen = false;
-        menu.hidden = true;
-        more.setAttribute("aria-expanded", "false");
-        hide();
+        closeMenu(true);
       }, 900);
     } else {
       setError(reply?.error || "无法加入下载队列");
@@ -525,10 +625,12 @@
   }
 
   async function downloadBest() {
-    const result = await resolve();
-    const data = result?.lookup;
+    const data = await resolve();
     if (!data?.choices?.length) return;
-    const best = data.choices.find((choice) => !choice.audio) || data.choices[0];
+    const best =
+      data.choices.find((choice) => !choice.audio && choice.height) ||
+      data.choices.find((choice) => !choice.audio) ||
+      data.choices[0];
     await choose(best);
   }
 
@@ -542,10 +644,12 @@
     first?.focus({ preventScroll: true });
   }
 
-  function closeMenu() {
+  function closeMenu(restoreFocus = false) {
+    const hadFocus = menu.contains(shadow.activeElement);
     menuOpen = false;
     menu.hidden = true;
     more.setAttribute("aria-expanded", "false");
+    if (restoreFocus && hadFocus) more.focus({ preventScroll: true });
   }
 
   go.addEventListener("click", downloadBest);
@@ -554,6 +658,13 @@
     else openMenu();
   });
   retry.addEventListener("click", () => resolve(true));
+  openApp.addEventListener("click", () => send({ type: "open" }));
+  close.addEventListener("click", () => {
+    if (!active) return;
+    dismissed.add(active);
+    closeMenu();
+    hide();
+  });
   surface.addEventListener("pointerenter", show);
   surface.addEventListener("pointerleave", () => {
     if (!menuOpen) hide();
@@ -566,6 +677,32 @@
     },
     true,
   );
+  shadow.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      if (menuOpen) closeMenu(true);
+      else hide();
+      event.preventDefault();
+      return;
+    }
+    if (!menuOpen || !["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    const items = [...list.querySelectorAll(".choice")];
+    if (!items.length) return;
+    const at = items.indexOf(shadow.activeElement);
+    const next =
+      event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? items.length - 1
+          : event.key === "ArrowDown"
+            ? Math.min(items.length - 1, at + 1)
+            : Math.max(0, at <= 0 ? items.length - 1 : at - 1);
+    items[next].focus({ preventScroll: true });
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  shadow.addEventListener("focusout", (event) => {
+    if (menuOpen && !shadow.contains(event.relatedTarget)) closeMenu();
+  });
 
   const observer = new MutationObserver(mountAll);
   observer.observe(document.documentElement, {
@@ -576,7 +713,7 @@
   });
 
   function mount(video) {
-    if (controls.has(video)) return;
+    if (controls.has(video) || dismissed.has(video)) return;
     const rect = video.getBoundingClientRect();
     if (video.tagName === "VIDEO") {
       if (rect.width < MIN_WIDTH || rect.height < MIN_HEIGHT) return;
@@ -592,6 +729,18 @@
     video.addEventListener("pointerenter", () => {
       active = video;
       show();
+      const key = `${pageFor(video)}\n${sourceFor(video)}`;
+      setTimeout(() => {
+        if (
+          active === video &&
+          video.isConnected &&
+          !video.mediaKeys &&
+          surface.dataset.show === "1" &&
+          (!lookup || lookupKey !== key)
+        ) {
+          resolve();
+        }
+      }, 650);
     });
     video.addEventListener("pointerleave", () => {
       if (!menuOpen) hide();

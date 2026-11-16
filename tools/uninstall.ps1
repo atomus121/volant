@@ -13,6 +13,7 @@ foreach ($lnk in @(
     if (Test-Path $lnk) { Remove-Item $lnk -Force }
 }
 Remove-Item "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Volant" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" -Name "Volant" -ErrorAction SilentlyContinue
 
 # Native messaging keys point at manifests in the data folder; drop them too,
 # otherwise the extension keeps pointing at a host that no longer exists.

@@ -52,6 +52,7 @@ Copy-Item -Recurse extension (Join-Path $portable "extension")
 Copy-Item docs\PRD.md (Join-Path $portable "README-PRD.md")
 Copy-Item docs\GPUI_MIGRATION.md (Join-Path $portable "README-GPUI.md")
 Copy-Item docs\GPUI_P5_REPORT.md (Join-Path $portable "GPUI_P5_REPORT.md")
+Copy-Item README-QUICKSTART.md (Join-Path $portable "README-QUICKSTART.md")
 [System.IO.File]::WriteAllText(
     (Join-Path $portable "VERSION"),
     $Version,

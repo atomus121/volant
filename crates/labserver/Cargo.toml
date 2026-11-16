@@ -1,7 +1,7 @@
 [package]
 name = "volant-labserver"
 description = "Volant 故障注入测试服务器：限速、断连、拒连、忽略 Range、传输中改文件"
-version = "0.6.16"
+version = "0.6.21"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

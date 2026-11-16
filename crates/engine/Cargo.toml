@@ -1,7 +1,7 @@
 [package]
 name = "volant-engine"
 description = "Volant HTTP 下载引擎：probe、动态分段、稀疏 part 文件、断点续传"
-version = "0.6.16"
+version = "0.6.21"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
